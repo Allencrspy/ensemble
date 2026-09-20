@@ -472,3 +472,4 @@ input[type=range][disabled] { opacity: .4; }
 }
 .btn-row.split { display: flex; gap: 8px; }
 .btn-row.split .btn { flex: 1; }
+.value.warn { color: var(--amber); }

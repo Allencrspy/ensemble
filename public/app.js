@@ -678,6 +678,7 @@ function syncSelfControls() {
   const vol = $('#volume');
   vol.value = Math.round(App.volume * 100); fillRange(vol);
   $('#vol-value').textContent = Math.round(App.volume * 100) + '%';
+  $('#vol-value').classList.toggle('warn', App.volume > 1);
   const trim = $('#trim');
   trim.value = App.trim; fillRange(trim);
   $('#trim-value').textContent = (App.trim > 0 ? '+' : '') + App.trim + ' ms';
@@ -1078,6 +1079,7 @@ function wireSession() {
     Engine.setVolume(App.volume);
     store.set('ensemble.volume', App.volume);
     $('#vol-value').textContent = vol.value + '%';
+    $('#vol-value').classList.toggle('warn', App.volume > 1);
     fillRange(vol);
   });
   vol.addEventListener('change', () => pushState({ volume: App.volume }));

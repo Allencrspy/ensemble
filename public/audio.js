@@ -179,7 +179,21 @@ function buildGraph(ctx, mode, channels = 2) {
   };
   const chain = (...nodes) => { for (let i = 0; i < nodes.length - 1; i++) nodes[i].connect(nodes[i + 1]); return nodes[nodes.length - 1]; };
 
-  if (mode === 'stereo') { input.connect(out); return { input, out, discrete: false }; }
+  /* Close every variant the same way: volume, then a brick-wall-ish limiter.
+     Boosting a quiet source past unity is the whole point of the wider volume
+     range, and this is what keeps that from turning into clipping. */
+  const finish = (discrete) => {
+    const limiter = ctx.createDynamicsCompressor();
+    limiter.threshold.value = -1.5;
+    limiter.knee.value = 0;
+    limiter.ratio.value = 20;
+    limiter.attack.value = 0.002;
+    limiter.release.value = 0.12;
+    out.connect(limiter);
+    return { input, out, exit: limiter, discrete };
+  };
+
+  if (mode === 'stereo') { input.connect(out); return finish(false); }
 
   const sp = ctx.createChannelSplitter(discrete ? channels : 2);
   const mg = ctx.createChannelMerger(2);
@@ -198,7 +212,7 @@ function buildGraph(ctx, mode, channels = 2) {
     sp.connect(g, DISCRETE_INDEX[mode]);
     both(g);
     mg.connect(out);
-    return { input, out, discrete: true };
+    return finish(true);
   }
 
   switch (mode) {
@@ -217,10 +231,10 @@ function buildGraph(ctx, mode, channels = 2) {
     case 'rl': both(chain(sum(0.5, -0.5), delay(0.032), filt('highpass', 200), filt('lowpass', 7000))); break;
     case 'rr': both(chain(sum(-0.5, 0.5), delay(0.038), filt('highpass', 200), filt('lowpass', 7000))); break;
 
-    default: input.connect(out); return { input, out, discrete: false };
+    default: input.connect(out); return finish(false);
   }
   mg.connect(out);
-  return { input, out, discrete: false };
+  return finish(false);
 }
 
 /* ────────────────────────────── audio engine ───────────────────────────── */
@@ -326,16 +340,19 @@ const Engine = {
     if (!this.ctx) return;
     const next = buildGraph(this.ctx, this.mode, this.sourceChannels());
     next.out.gain.value = this.muted ? 0 : this.volume;
-    next.out.connect(this.analyser);
+    next.exit.connect(this.analyser);
     if (this.source) { try { this.source.disconnect(); } catch {} this.source.connect(next.input); }
-    if (this.graph) { const old = this.graph; setTimeout(() => { try { old.out.disconnect(); } catch {} }, 150); }
+    if (this.graph) {
+      const old = this.graph;
+      setTimeout(() => { try { old.out.disconnect(); old.exit.disconnect(); } catch {} }, 150);
+    }
     this.graph = next;
     if (typeof Live !== 'undefined' && Live.player) Live.connectPlayer();   // keep the live stream attached
   },
 
   setMode(m) { const n = normalizeMode(m); if (n === this.mode) return; this.mode = n; this.rebuild(); },
   get discrete() { return !!(this.graph && this.graph.discrete); },
-  setVolume(v) { this.volume = clamp(v, 0, 1); this.applyGain(); },
+  setVolume(v) { this.volume = clamp(v, 0, 3); this.applyGain(); },
   setMuted(b) { this.muted = !!b; this.applyGain(); },
   applyGain() {
     if (!this.graph) return;

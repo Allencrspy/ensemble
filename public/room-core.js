@@ -145,7 +145,7 @@
           device[k] = round ? Math.round(clamp(p[k], lo, hi)) : clamp(p[k], lo, hi);
         };
         num('rtt', 0, 1e5); num('progress', 0, 1); num('drift', -1e5, 1e5);
-        num('skew', -1e4, 1e4); num('volume', 0, 1); num('trim', -500, 500, true);
+        num('skew', -1e4, 1e4); num('volume', 0, 3); num('trim', -500, 500, true);
         num('battery', 0, 100, true);
         num('lat', 0, 2000);
         if (typeof p.tsrc === 'string') device.tsrc = p.tsrc.slice(0, 12);
@@ -249,7 +249,7 @@
         if (!target) return false;
         const patch = {};
         if (typeof msg.mode === 'string') { target.mode = msg.mode; patch.mode = msg.mode; }
-        if (typeof msg.volume === 'number') { target.volume = clamp(msg.volume, 0, 1); patch.volume = target.volume; }
+        if (typeof msg.volume === 'number') { target.volume = clamp(msg.volume, 0, 3); patch.volume = target.volume; }
         if (typeof msg.muted === 'boolean') { target.muted = msg.muted; patch.muted = msg.muted; }
         if (typeof msg.trim === 'number') { target.trim = Math.round(clamp(msg.trim, -500, 500)); patch.trim = target.trim; }
         ctx.send(target.id, { t: 'apply', patch });
