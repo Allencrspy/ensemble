@@ -24,6 +24,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/configure-pages@v5
+      # Pages serves assets with a 10 minute cache. Stamping the commit sha onto
+      # every asset URL means a deploy is visible on the next page load, not ten
+      # minutes later.
+      - name: Stamp asset URLs with the commit sha
+        run: |
+          SHA="${GITHUB_SHA:0:8}"
+          cd public
+          sed -i -E "s|(src=\")([a-z-]+\.js)\"|\1\2?v=$SHA\"|g" index.html
+          sed -i -E "s|(href=\")(styles\.css)\"|\1\2?v=$SHA\"|g" index.html
+          grep -o 'v=[0-9a-f]*' index.html | sort -u
       - uses: actions/upload-pages-artifact@v3
         with:
           path: public
