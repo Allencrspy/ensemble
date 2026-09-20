@@ -247,7 +247,10 @@ const Engine = {
   async unlock() {
     if (!this.ctx) {
       const AC = window.AudioContext || window.webkitAudioContext;
-      this.ctx = new AC({ latencyHint: 'interactive' });   // smallest buffer: timing beats power here
+      const forced = Number(new URLSearchParams(location.search).get('rate')) || 0;
+      this.ctx = forced
+        ? new AC({ latencyHint: 'interactive', sampleRate: forced })   // for testing rate mismatch
+        : new AC({ latencyHint: 'interactive' });                      // smallest buffer: timing beats power
       this.analyser = this.ctx.createAnalyser();
       this.analyser.fftSize = 256;
       this.analyser.smoothingTimeConstant = 0.72;
@@ -335,6 +338,7 @@ const Engine = {
     if (this.source) { try { this.source.disconnect(); } catch {} this.source.connect(next.input); }
     if (this.graph) { const old = this.graph; setTimeout(() => { try { old.out.disconnect(); } catch {} }, 150); }
     this.graph = next;
+    if (window.Live && Live.player) Live.connectPlayer();
   },
 
   setMode(m) { if (m === this.mode) return; this.mode = m; this.rebuild(); },

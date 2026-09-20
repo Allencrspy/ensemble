@@ -21,8 +21,8 @@ const Live = {
   on: false, sending: false,
   stream: null, node: null, src: null, sink: null, worklet: false,
   rate: 48000, channels: 2, bufferMs: 700, chunkFrames: 1024,
-  seq: 0, nextCtx: 0, anchored: false,
-  stats: { sent: 0, played: 0, late: 0, reanchors: 0, bytes: 0, lastArrival: 0 },
+  seq: 0, epochCtx: null, player: null, playerModule: false, localAudioSuppressed: false,
+  stats: { sent: 0, played: 0, late: 0, reanchors: 0, bytes: 0, lastArrival: 0, under: 0, filled: 0 },
 
   get ctx() { return Engine.ctx; },
 
@@ -46,7 +46,16 @@ const Live = {
       if (!this.supported()) throw new Error('This browser cannot capture tab audio');
       stream = await navigator.mediaDevices.getDisplayMedia({
         video: true,
-        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+        audio: {
+          echoCancellation: false, noiseSuppression: false, autoGainControl: false,
+          // Stop the captured tab playing out of this device's own speakers.
+          // Without it you hear the source now and the synced room a buffer later.
+          suppressLocalAudioPlayback: true,
+        },
+        // Chrome only offers the audio checkbox when video is asked for too,
+        // and prefers the tab picker when we say so.
+        systemAudio: 'include',
+        selfBrowserSurface: 'exclude',
       });
       stream.getVideoTracks().forEach((t) => t.stop());          // we only wanted the sound
       if (!stream.getAudioTracks().length) {
@@ -75,6 +84,12 @@ const Live = {
     this.stats = { sent: 0, played: 0, late: 0, reanchors: 0, bytes: 0, lastArrival: 0 };
     this.node.port.onmessage = (e) => this.onCaptured(e.data);
     this.sending = true;
+
+    // Did the browser honour the suppression request? Chrome 109+ does for tab
+    // capture; anything else means the user has to mute the source themselves.
+    const track = stream.getAudioTracks()[0];
+    const settings = (track && track.getSettings && track.getSettings()) || {};
+    this.localAudioSuppressed = settings.suppressLocalAudioPlayback === true;
 
     this.announcedAt = performance.now();
     Net.send({ t: 'live', on: true, rate: this.rate, channels: this.channels, bufferMs: this.bufferMs });
@@ -169,21 +184,116 @@ const Live = {
 
   /* ────────────────────────────── listener side ────────────────────────── */
 
+  /*
+   * Playback is a reader over a timeline, not a queue of scheduled buffers.
+   * Incoming PCM lands in a ring buffer indexed by its absolute position in the
+   * stream; an AudioWorklet works out, for every single output sample, where
+   * the room clock says the stream should be and interpolates there.
+   *
+   * That does three things a chunk-per-chunk scheduler cannot: it resamples
+   * continuously (the host may run at 44.1 kHz while this device runs at 48),
+   * it absorbs clock drift smoothly instead of jumping when it accumulates,
+   * and a missing chunk costs silence rather than the anchor.
+   */
+  async ensurePlayer() {
+    if (this.player || !window.AudioWorkletNode) return this.player;
+    if (!this.playerModule) {
+      const code = `
+        class LivePlay extends AudioWorkletProcessor {
+          constructor(o) {
+            super();
+            this.size = o.processorOptions.size;
+            this.l = new Float32Array(this.size);
+            this.r = new Float32Array(this.size);
+            this.maxIdx = -1; this.minIdx = 0;
+            this.epoch = 0; this.rate = 48000; this.have = false;
+            this.under = 0; this.filled = 0; this.tick = 0;
+            this.port.onmessage = (e) => {
+              const d = e.data;
+              if (d.reset) { this.maxIdx = -1; this.minIdx = 0; this.have = false; }
+              if (d.epoch !== undefined) { this.epoch = d.epoch; this.rate = d.rate; this.have = true; }
+              if (d.l) this.write(d.idx, d.l, d.r);
+            };
+          }
+          write(idx, l, r) {
+            const n = l.length, size = this.size;
+            for (let i = 0; i < n; i++) {
+              let p = (idx + i) % size; if (p < 0) p += size;
+              this.l[p] = l[i]; this.r[p] = r[i];
+            }
+            const last = idx + n - 1;
+            if (last > this.maxIdx) this.maxIdx = last;
+            this.minIdx = Math.max(this.minIdx, this.maxIdx - size + 1);
+          }
+          process(_, outputs) {
+            const out = outputs[0];
+            const L = out[0], R = out[1] || out[0];
+            const n = L.length;
+            if (!this.have) { L.fill(0); if (R !== L) R.fill(0); return true; }
+            const size = this.size;
+            for (let i = 0; i < n; i++) {
+              const pos = (currentTime + i / sampleRate - this.epoch) * this.rate;
+              const i0 = Math.floor(pos), f = pos - i0;
+              if (i0 < this.minIdx || i0 + 1 > this.maxIdx) {
+                L[i] = 0; if (R !== L) R[i] = 0;
+                if (this.filled) this.under++;      // silence before the first sample is the buffer filling, not a gap
+                continue;
+              }
+              let a = i0 % size; if (a < 0) a += size;
+              let b = (i0 + 1) % size; if (b < 0) b += size;
+              L[i] = this.l[a] * (1 - f) + this.l[b] * f;
+              if (R !== L) R[i] = this.r[a] * (1 - f) + this.r[b] * f;
+              this.filled++;
+            }
+            if (++this.tick % 40 === 0) {
+              this.port.postMessage({ under: this.under, filled: this.filled, ahead: this.maxIdx });
+            }
+            return true;
+          }
+        }
+        registerProcessor('ens-play', LivePlay);`;
+      const url = URL.createObjectURL(new Blob([code], { type: 'application/javascript' }));
+      await this.ctx.audioWorklet.addModule(url);
+      URL.revokeObjectURL(url);
+      this.playerModule = true;
+    }
+    const size = Math.ceil(this.ctx.sampleRate * 4) * 2;      // ~8 s of slack
+    this.player = new AudioWorkletNode(this.ctx, 'ens-play', {
+      numberOfInputs: 0, outputChannelCount: [2],
+      processorOptions: { size },
+    });
+    this.player.port.onmessage = (e) => {
+      this.stats.under = e.data.under;
+      this.stats.filled = e.data.filled;
+    };
+    this.connectPlayer();
+    return this.player;
+  },
+
+  /** Re-attached whenever the channel-mode graph is rebuilt. */
+  connectPlayer() {
+    if (!this.player || !Engine.graph) return;
+    try { this.player.disconnect(); } catch {}
+    this.player.connect(Engine.graph.input);
+  },
+
   begin(meta) {
     this.on = true;
     this.rate = meta.rate || 48000;
     this.channels = meta.channels || 2;
     this.bufferMs = meta.bufferMs || 700;
-    this.anchored = false;
+    this.epochCtx = null;
     this.stats.played = this.stats.late = this.stats.reanchors = 0;
+    this.ensurePlayer().catch(() => {});
   },
 
   end() {
     this.on = false;
-    this.anchored = false;
+    this.epochCtx = null;
+    if (this.player) { try { this.player.port.postMessage({ reset: true }); } catch {} }
   },
 
-  /** Schedule one arriving chunk at the instant its timestamp names. */
+  /** Place one arriving chunk on the timeline. */
   enqueue(buf) {
     if (!this.ctx || this.ctx.state !== 'running' || !Engine.graph) return;
     const view = new DataView(buf);
@@ -191,43 +301,33 @@ const Live = {
     const channels = view.getUint8(4) || 2;
     const playAt = view.getFloat64(8);
     const rate = view.getUint32(16) || this.rate;
+    const seq = view.getUint32(20);
     const pcm = new Int16Array(buf, LIVE_HEADER);
     const frames = pcm.length / channels;
     if (!frames) return;
-    this.rate = rate;               // the chunk is authoritative, not the announcement
+
+    this.rate = rate;
     this.on = true;
-
     this.stats.lastArrival = performance.now();
-    const dur = frames / rate;
-    const target = Engine.scheduleAt(playAt) + Engine.trim / 1000;
-
-    // Run a contiguous cursor rather than trusting each chunk's own mapping:
-    // per-chunk jitter would put audible seams between them.
-    if (!this.anchored || Math.abs(target - this.nextCtx) > 0.03) {
-      if (this.anchored) this.stats.reanchors++;
-      this.nextCtx = target;
-      this.anchored = true;
-    }
-    const when = this.nextCtx;
-    this.nextCtx += dur;
-
-    if (when < this.ctx.currentTime + 0.005) {          // arrived too late to be useful
-      this.stats.late++;
-      this.anchored = false;
-      return;
-    }
-
-    const ab = this.ctx.createBuffer(2, frames, rate);
-    const L = ab.getChannelData(0), R = ab.getChannelData(1);
-    for (let i = 0; i < frames; i++) {
-      L[i] = pcm[i * channels] / 0x8000;
-      R[i] = pcm[i * channels + (channels > 1 ? 1 : 0)] / 0x8000;
-    }
-    const src = this.ctx.createBufferSource();
-    src.buffer = ab;
-    src.connect(Engine.graph.input);                    // channel modes and volume still apply
-    src.start(when);
     this.stats.played++;
+
+    if (!this.player) { this.ensurePlayer().catch(() => {}); if (!this.player) return; }
+
+    const idx = (seq - 1) * frames;                 // absolute position in the stream
+    const trimSec = Engine.trim / 1000;
+    const wantEpoch = Engine.scheduleAt(playAt) + trimSec - idx / rate;
+    if (this.epochCtx === null || Math.abs(wantEpoch - this.epochCtx) > 0.05) {
+      if (this.epochCtx !== null) this.stats.reanchors++;
+      this.epochCtx = wantEpoch;
+      this.player.port.postMessage({ epoch: this.epochCtx, rate });
+    }
+
+    const l = new Float32Array(frames), r = new Float32Array(frames);
+    for (let i = 0; i < frames; i++) {
+      l[i] = pcm[i * channels] / 0x8000;
+      r[i] = pcm[i * channels + (channels > 1 ? 1 : 0)] / 0x8000;
+    }
+    this.player.port.postMessage({ idx, l, r }, [l.buffer, r.buffer]);
   },
 
   diagnostics() {
@@ -236,6 +336,8 @@ const Live = {
       rate: this.rate, chunkMs: +(this.chunkFrames / this.rate * 1000).toFixed(1),
       sent: this.stats.sent, played: this.stats.played,
       late: this.stats.late, reanchors: this.stats.reanchors,
+      gapPct: this.stats.filled ? +((this.stats.under / (this.stats.under + this.stats.filled)) * 100).toFixed(2) : 0,
+      suppressed: this.localAudioSuppressed,
       kbps: +((this.stats.bytes * 8) / 1000 / Math.max(1, this.stats.sent * this.chunkFrames / this.rate)).toFixed(0),
     };
   },

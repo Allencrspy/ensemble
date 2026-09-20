@@ -690,7 +690,7 @@ function renderRoom() {
   $('#live-bar').hidden = !live;
   if (live) {
     $('#live-text').textContent = Live.sending
-      ? 'Live — streaming this device'
+      ? (Live.localAudioSuppressed ? 'Live — source muted here' : 'Live — mute the source tab')
       : `Live from ${liveHost ? liveHost.name : 'the host'}`;
   }
   $('#btn-live').textContent = Live.sending ? 'Stop streaming' : 'Stream what I\u2019m playing';
@@ -859,7 +859,7 @@ function frame() {
     const d = Live.diagnostics();
     $('#live-stats').textContent = Live.sending
       ? `${d.chunkMs} ms chunks · ${d.kbps} kbps`
-      : `${d.played} chunks · ${d.late} late · ${d.reanchors} resyncs`;
+      : `${d.played} chunks · ${d.gapPct}% gaps · ${d.reanchors} resyncs`;
   } else if (pb.mode === 'idle' || pb.mode === 'paused') setBadge(Engine.buffer ? 'Ready' : (App.room.track ? 'Loading…' : 'No track'));
   else if (pb.mode === 'metronome') setBadge('Sync test');
   else setBadge('Playing · ' + ((MODE_BY_ID[App.mode] || {}).label || ''));
@@ -1182,7 +1182,9 @@ function wireSession() {
     try {
       Live.bufferMs = App.room.syncBuffer;
       await Live.startCapture();
-      toast('Streaming — mute this device\u2019s own speakers to avoid hearing it twice', 6000);
+      toast(Live.localAudioSuppressed
+        ? 'Streaming — the source is muted here, you hear the synced copy'
+        : 'Streaming — mute the source tab, or you will hear it twice', 6000);
     } catch (e) {
       toast(e.message || 'Could not capture audio');
     } finally {
