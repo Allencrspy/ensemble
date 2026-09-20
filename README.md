@@ -246,6 +246,20 @@ decoding the full-quality file locally and playing it against a shared clock
 beats it on both counts. If a phone is itself feeding a Bluetooth speaker, the
 delay measurement above is what compensates for it.
 
+## Refreshing
+
+A reload does not cost you the room. The session is kept per tab, and on load
+the app walks straight back in — a listener rejoins by code, and a **host
+re-hosts under the same code**, so devices that were knocking on that name
+simply reconnect. Because each browser carries a stable key, the room
+recognises the returning device and hands back its role, trim and volume
+instead of adding a second speaker. Listeners keep retrying for about two
+minutes, which comfortably covers a host refresh.
+
+What does not survive a host refresh: the shared file and any live capture,
+since both live in that tab's memory and screen capture needs a fresh gesture.
+The room, the devices and their settings all do.
+
 ## Limits
 
 - The host shares a *file*, not its live system audio. Mirroring whatever the

@@ -219,6 +219,7 @@ const App = {
   loadedTrackId: null, loadingTrackId: null, pendingBytes: null,
   appliedPlayback: '', scrubbing: false, lanInfo: null,
   name: store.get('ensemble.name') || '',
+  resuming: false, leaving: false, rejoinTries: 0,
   key: (() => {
     let k = store.get('ensemble.key');
     if (!k) {
@@ -243,6 +244,56 @@ function toast(msg, ms = 2800) {
   toast._t = setTimeout(() => { t.hidden = true; }, ms);
 }
 
+/* ───────────────────────────────── session ─────────────────────────────── */
+
+/**
+ * A refresh should not cost you the room.
+ *
+ * The room we were in lives in sessionStorage — per tab, gone when the tab is,
+ * which is exactly the lifetime a refresh needs. On load we walk straight back
+ * in: a listener rejoins by code, and a host re-hosts *under the same code*, so
+ * the devices already retrying that name simply reconnect. The stable device
+ * key means the room recognises us and gives back our role, trim and volume
+ * rather than adding a second speaker.
+ */
+const Session = {
+  KEY: 'ensemble.session',
+  MAX_AGE: 3 * 60 * 1000,
+
+  save(code, host) {
+    try { sessionStorage.setItem(this.KEY, JSON.stringify({ code, host, at: Date.now() })); } catch {}
+  },
+  load() {
+    try {
+      const raw = JSON.parse(sessionStorage.getItem(this.KEY) || 'null');
+      if (!raw || !raw.code || Date.now() - raw.at > this.MAX_AGE) return null;
+      return raw;
+    } catch { return null; }
+  },
+  touch() { const s = this.load(); if (s) this.save(s.code, s.host); },
+  clear() { try { sessionStorage.removeItem(this.KEY); } catch {} },
+};
+
+/** Walk back into the room we were in before the page reloaded. */
+async function resumeSession(saved) {
+  App.resuming = true;
+  $('#btn-host').disabled = true;
+  $('#btn-join').disabled = true;
+  $('#landing-note').textContent = saved.host
+    ? `Reopening session ${saved.code}…`
+    : `Rejoining session ${saved.code}…`;
+  try {
+    await connectRoom({ create: saved.host, code: saved.code, preferCode: saved.code });
+  } catch {
+    Session.clear();
+    $('#landing-note').textContent = `Could not rejoin ${saved.code}. Start or join a session.`;
+  } finally {
+    App.resuming = false;
+    $('#btn-host').disabled = false;
+    $('#btn-join').disabled = false;
+  }
+}
+
 /* ───────────────────────────────── network ─────────────────────────────── */
 
 async function connectRoom(opts) {
@@ -253,7 +304,7 @@ async function connectRoom(opts) {
   };
   try {
     await Net.start({
-      create: opts.create, code: opts.code,
+      create: opts.create, code: opts.code, preferCode: opts.preferCode,
       name: App.name || defaultName(), mode: App.mode, key: App.key,
     });
   } catch (err) {
@@ -264,11 +315,29 @@ async function connectRoom(opts) {
 
 function onDisconnected() {
   App.connected = false;
-  if (!App.id) return;
-  setSyncPill('bad', Net.mode === 'p2p' ? 'host gone' : 'reconnecting');
+  if (!App.id || App.leaving) return;
   Engine.stop(); Engine.stopMetronome();
-  if (Net.mode === 'ws') setTimeout(() => connectRoom({ create: false, code: App.room ? App.room.code : null }), 1500);
-  else toast('Lost the connection to the host');
+  if (Live.on) Live.end();
+
+  const code = App.room ? App.room.code : (Session.load() || {}).code;
+  if (!code) return;
+
+  // The usual reason a host vanishes is that it refreshed, and it will be back
+  // on the same code within a second or two. Keep knocking rather than giving
+  // up: two minutes of patience costs nothing and saves the room.
+  App.rejoinTries = (App.rejoinTries || 0) + 1;
+  if (App.rejoinTries > 40) {
+    setSyncPill('bad', 'disconnected');
+    toast('Lost the host. Rejoin when they are back.');
+    return;
+  }
+  setSyncPill('bad', `reconnecting (${App.rejoinTries})`);
+  const wait = Math.min(4000, 800 + App.rejoinTries * 400);
+  setTimeout(() => {
+    if (App.connected || App.leaving) return;
+    Net.teardown();
+    connectRoom({ create: false, code }).catch(() => {});
+  }, wait);
 }
 
 function handleMessage(m) {
@@ -277,6 +346,9 @@ function handleMessage(m) {
     case 'sync': Clock.note(m.c, m.s); break;
     case 'welcome':
       App.id = m.id;
+      App.rejoinTries = 0;
+      setSyncPill('', 'syncing…');       // clear any 'reconnecting' left on screen
+      Session.save(m.room.code, m.room.hostId === m.id);
       applyRoom(m.room);
       show('session');
       Sensors.init();
@@ -315,7 +387,11 @@ function handleMessage(m) {
       if (m.backupPeer) Net.connectParent(m.backupPeer, m.backupId, 'backup');
       break;
     case 'relayed': handleRelay(m.from, m.payload); break;
-    case 'promoted': toast('You are the host now'); renderShare(); break;
+    case 'promoted':
+      toast('You are the host now');
+      Session.save(App.room.code, true);       // a refresh must now re-host, not rejoin
+      renderShare();
+      break;
     case 'superseded':
       App.id = null;
       Engine.stop(); Engine.stopMetronome();
@@ -323,6 +399,8 @@ function handleMessage(m) {
       setTimeout(() => { show('landing'); }, 300);
       break;
     case 'kicked':
+      App.leaving = true;
+      Session.clear();
       toast('Removed from the session');
       setTimeout(() => location.reload(), 1200);
       break;
@@ -1035,6 +1113,7 @@ function syncTick() {
   if (pb.mode === 'metronome') Engine.pumpMetronome();
 
   latencyTick();
+  if (App.id) Session.touch();
 
   const t = performance.now();
   if (t - lastReport > 1500) {
@@ -1190,7 +1269,11 @@ function wireLanding() {
 }
 
 function wireSession() {
-  $('#btn-leave').addEventListener('click', () => location.reload());
+  $('#btn-leave').addEventListener('click', () => {
+    App.leaving = true;
+    Session.clear();
+    location.reload();
+  });
 
   $('#btn-copy').addEventListener('click', async () => {
     try { await navigator.clipboard.writeText(qrTargetUrl()); toast('Link copied'); }
@@ -1429,3 +1512,9 @@ setInterval(syncTick, 700);
 
 const hash = (location.hash || '').replace('#', '').toUpperCase();
 if (/^[A-Z0-9]{4}$/.test(hash)) $$('#code-input input').forEach((b, i) => { b.value = hash[i] || ''; });
+
+const saved = Session.load();
+if (saved) {
+  $$('#code-input input').forEach((b, i) => { b.value = saved.code[i] || ''; });
+  resumeSession(saved);
+}

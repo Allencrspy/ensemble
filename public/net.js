@@ -238,7 +238,21 @@ const Net = {
 
   async start(opts) {
     this.mode = this.mode || await this.detectMode();
+    this.lastOpts = opts;
     return this.mode === 'ws' ? this.startWS(opts) : this.startP2P(opts);
+  },
+
+  /** Tear down every socket this device owns, for a clean re-entry. */
+  teardown() {
+    for (const c of [this.parentConn, this.backupConn]) { try { c && c.close(); } catch {} }
+    for (const c of this.children.values()) { try { c.close(); } catch {} }
+    this.children.clear();
+    this.parentConn = this.backupConn = null;
+    this.parentId = this.backupId = null;
+    try { this.link && this.link.close(); } catch {}
+    try { this.peer && this.peer.destroy(); } catch {}
+    this.link = null; this.peer = null; this.hub = null; this.isHub = false;
+    this.transfer = null;
   },
 
   /* ── LAN ── */
@@ -262,15 +276,25 @@ const Net = {
   },
 
   async hostP2P(opts) {
-    for (let attempt = 0; attempt < 5; attempt++) {
-      const code = RoomCore.makeCode();
+    // Reclaiming the old code after a refresh is what lets everyone else stay:
+    // they are already retrying that exact name. The broker needs a moment to
+    // release it once the previous socket drops, so keep asking for a while
+    // before giving up and minting a new one.
+    const wanted = opts.preferCode ? String(opts.preferCode).toUpperCase() : null;
+    for (let attempt = 0; attempt < 10; attempt++) {
+      const reclaiming = wanted && attempt < 7;
+      const code = reclaiming ? wanted : RoomCore.makeCode();
       const peer = new Peer(PEER_PREFIX + code, { debug: 0 });
       const ok = await new Promise((res) => {
         peer.on('open', () => res(true));
         peer.on('error', (e) => res(e.type === 'unavailable-id' ? false : Promise.reject(e)));
         setTimeout(() => res(false), 12000);
       }).catch((e) => { throw e; });
-      if (!ok) { peer.destroy(); continue; }
+      if (!ok) {
+        peer.destroy();
+        if (reclaiming) await new Promise((r) => setTimeout(r, 1200));
+        continue;
+      }
 
       this.peer = peer;
       this.code = code;
