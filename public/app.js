@@ -308,6 +308,11 @@ function handleMessage(m) {
       toast('Host adjusted this device');
       break;
     }
+    case 'parent':
+      // The host has told us where our audio comes from. Root feeds itself.
+      Net.depth = m.depth || 0;
+      if (m.parentPeer) Net.connectParent(m.parentPeer, m.parentId);
+      break;
     case 'relayed': handleRelay(m.from, m.payload); break;
     case 'promoted': toast('You are the host now'); renderShare(); break;
     case 'superseded':
@@ -755,6 +760,7 @@ function renderDevices() {
       extra.push(`<span class="bat${d.battery <= 20 && !d.charging ? ' low' : ''}">${d.battery}%${d.charging ? ' ⚡' : ''}</span>`);
     }
     if (d.awake) extra.push('screen held');
+    if (d.depth) extra.push(`hop ${d.depth}${typeof d.hopRtt === 'number' ? ` · ${d.hopRtt} ms` : ''}`);
     if (typeof d.lat === 'number' && d.lat > 0) extra.push(`${Math.round(d.lat)} ms out`);
     if (d.tsrc === 'rejected' || d.tsrc === 'none') extra.push('<span class="warn">est. timing</span>');
     return `
@@ -868,9 +874,10 @@ function frame() {
   if (pb.mode === 'live') {
     setBadge('Live · ' + ((MODE_BY_ID[App.mode] || {}).label || ''));
     const d = Live.diagnostics();
+    const hop = Net.depth ? ` · hop ${Net.depth}` : '';
     $('#live-stats').textContent = Live.sending
-      ? `${d.chunkMs} ms chunks · ${d.kbps} kbps`
-      : `${d.played} chunks · ${d.gapPct}% gaps · ${d.reanchors} resyncs`;
+      ? `${d.codec} · ${d.kbps} kbps · ${Net.children.size} fed`
+      : `${d.codec}${hop} · ${d.gapPct}% gaps · ${d.reanchors} resyncs`;
   } else if (pb.mode === 'idle' || pb.mode === 'paused') setBadge(Engine.buffer ? 'Ready' : (App.room.track ? 'Loading…' : 'No track'));
   else if (pb.mode === 'metronome') setBadge('Sync test');
   else setBadge('Playing · ' + ((MODE_BY_ID[App.mode] || {}).label || ''));
@@ -1159,6 +1166,11 @@ function wireSession() {
       },
       engine: Engine.diagnostics(),
       live: Live.diagnostics(),
+      mesh: {
+        depth: Net.depth, parentId: Net.parentId, hopRttMs: Net.hopRtt,
+        children: Net.children.size,
+        shape: Net.isHub && Net.hub ? Mesh.cost(Mesh.plan([...Net.hub.room.devices.values()], Net.hub.room.hostId)) : null,
+      },
       playback: App.room.playback,
       syncBufferMs: App.room.syncBuffer,
       devices: App.room.devices.map((d) => ({

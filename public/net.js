@@ -12,6 +12,7 @@
 'use strict';
 
 const PEER_PREFIX = 'ensemble1-';
+const AUDIO_LABEL = 'ens-audio';
 const CHUNK = 64 * 1024;
 
 /* ─────────────────────────────── links ─────────────────────────────────── */
@@ -101,6 +102,27 @@ class Hub {
     this.ctx().broadcast({ t: 'roster', room: RoomCore.snapshot(this.room), serverNow: this.now() });
   }
 
+  /** Recompute who feeds whom, and notify only the devices that moved. */
+  retree() {
+    const plan = Mesh.plan([...this.room.devices.values()], this.room.hostId);
+    for (const [id, node] of plan) {
+      const dev = this.room.devices.get(id);
+      if (!dev) continue;
+      dev.parent = node.parent;
+      dev.depth = node.depth;
+      const parent = node.parent ? this.room.devices.get(node.parent) : null;
+      const sig = `${node.parent || ''}|${parent ? parent.peerId : ''}|${node.depth}`;
+      if (dev._treeSig === sig) continue;
+      dev._treeSig = sig;
+      this.ctx().send(id, {
+        t: 'parent',
+        parentId: node.parent,
+        parentPeer: parent ? parent.peerId : null,
+        depth: node.depth,
+      });
+    }
+  }
+
   attach(link, opts) {
     let stale = RoomCore.findByKey(this.room, opts.key);
     if (stale && stale.id === this.localId) stale = null;   // the tab running the hub is never superseded
@@ -112,11 +134,12 @@ class Hub {
     }
     const device = RoomCore.join(this.room, this.ctx(), {
       id: (crypto.randomUUID ? crypto.randomUUID() : String(Math.random())).replace(/-/g, '').slice(0, 12),
-      key: opts.key, name: opts.name, mode: opts.mode,
+      key: opts.key, name: opts.name, mode: opts.mode, peerId: opts.peerId,
       forceHost: !!opts.forceHost, inherit: stale,
     });
     this.links.set(device.id, link);
     link.send({ t: 'welcome', id: device.id, serverNow: this.now(), room: RoomCore.snapshot(this.room) });
+    this.retree();
     this.roster();
     return device;
   }
@@ -126,6 +149,7 @@ class Hub {
     if (link) { link.close(); this.links.delete(id); }
     const promoted = RoomCore.leave(this.room, id);
     if (promoted) this.ctx().send(promoted.id, { t: 'promoted' });
+    this.retree();                 // a departure orphans a subtree; re-plan at once
     this.roster();
   }
 
@@ -133,6 +157,8 @@ class Hub {
     const device = this.room.devices.get(deviceId);
     if (!device || !msg) return;
     if (msg.t === 'fetch') { this.streamTrack(deviceId); return; }
+    if (msg.t === 'reparent') { device._treeSig = null; this.retree(); return; }
+    if (msg.t === 'state' && msg.patch && msg.patch.peerId) { device._treeSig = null; }
     if (RoomCore.handle(this.room, device, msg, this.ctx())) this.roster();
   }
 
@@ -163,6 +189,11 @@ class Hub {
 const Net = {
   mode: null,          // 'ws' | 'p2p'
   transfer: null,      // in-flight file transfer over the data channel
+  children: new Map(), // deviceId -> audio DataConnection we feed
+  parentConn: null,    // audio DataConnection we are fed by
+  parentId: null,
+  depth: 0,
+  hopRtt: null,
   link: null,
   hub: null,
   peer: null,
@@ -239,6 +270,7 @@ const Net = {
 
       // Remote devices arrive here; each gets its own link into the hub.
       peer.on('connection', (conn) => {
+        if (conn.label === AUDIO_LABEL) { conn.on('open', () => this.acceptChild(conn)); return; }
         conn.on('open', () => {
           const link = new PeerLink(conn);
           let device = null;
@@ -247,7 +279,7 @@ const Net = {
             if (msg instanceof ArrayBuffer) return;
             if (!device) {
               if (msg.t !== 'join') return;
-              device = this.hub.attach(link, { name: msg.name, mode: msg.mode, key: msg.key });
+              device = this.hub.attach(link, { name: msg.name, mode: msg.mode, key: msg.key, peerId: msg.peerId });
             } else this.hub.receive(device.id, msg);
           };
           link.onClose = () => { if (device) this.hub.remove(device.id); };
@@ -263,7 +295,7 @@ const Net = {
       this.link = local;
       const device = this.hub.attach({
         send: (m) => local.deliver(m), close: () => {}, get buffered() { return 0; },
-      }, { name: opts.name, mode: opts.mode, key: opts.key, forceHost: true });
+      }, { name: opts.name, mode: opts.mode, key: opts.key, peerId: peer.id, forceHost: true });
       this.localId = device.id;
       this.hub.localId = device.id;
       this.onStatus('connected');
@@ -312,27 +344,94 @@ const Net = {
       }, 20000);
     });
 
+    // Other devices may be told to take their audio from us, so listen for them.
+    peer.on('connection', (c) => {
+      if (c.label === AUDIO_LABEL) c.on('open', () => this.acceptChild(c));
+      else c.close();
+    });
+
     const link = new PeerLink(conn);
     this.link = link;
     this.code = code;
     link.onMessage = (m) => this.dispatch(m);
     link.onClose = () => this.onStatus('closed');
-    link.send({ t: 'join', name: opts.name, mode: opts.mode, key: opts.key });
+    link.send({ t: 'join', name: opts.name, mode: opts.mode, key: opts.key, peerId: peer.id });
+    this.startHopProbe();
     this.onStatus('connected');
   },
 
   send(msg) { if (this.link) this.link.send(msg); },
 
-  /** Host only: push a live audio chunk to every other device. */
+  /** Source of the stream: hand it to our own children (and the server, on a LAN). */
   broadcastBinary(buf) {
-    if (this.isHub && this.hub) {
-      for (const [id, l] of this.hub.links) {
-        if (id === this.localId) continue;
-        try { l.send(buf); } catch {}
-      }
-      return;
+    this.relayAudio(buf);
+    if (this.mode === 'ws' && this.link && this.link.sendBinary) this.link.sendBinary(buf);
+  },
+
+  /**
+   * Pass a chunk down the tree. Every node carries at most `fanout` streams,
+   * which is the whole point: Wi-Fi shares airtime per station, so 50 devices
+   * can only work if 50 stations do the transmitting.
+   */
+  relayAudio(buf) {
+    for (const [id, conn] of this.children) {
+      if (!conn.open) { this.children.delete(id); continue; }
+      try { conn.send(buf); } catch {}
     }
-    if (this.link && this.link.sendBinary) this.link.sendBinary(buf);   // LAN: the server relays
+  },
+
+  /** Accept an audio connection from a device the host told to feed off us. */
+  acceptChild(conn) {
+    const id = (conn.metadata && conn.metadata.id) || conn.peer;
+    this.children.set(id, conn);
+    conn.on('data', (d) => {
+      if (d && d.k === 'hp') { try { conn.send({ k: 'hpr', t: d.t }); } catch {} }   // hop probe
+    });
+    const drop = () => { this.children.delete(id); };
+    conn.on('close', drop);
+    conn.on('error', drop);
+  },
+
+  /** Attach to the parent the host assigned, and start measuring that hop. */
+  async connectParent(parentPeer, parentId) {
+    if (!this.peer || !parentPeer) return;
+    if (this.parentId === parentId && this.parentConn && this.parentConn.open) return;
+    if (this.parentConn) { try { this.parentConn.close(); } catch {} this.parentConn = null; }
+    this.parentId = parentId;
+
+    const conn = this.peer.connect(parentPeer, {
+      label: AUDIO_LABEL,
+      // Live audio must not wait for retransmits: a late chunk is worse than a
+      // missing one, and an ordered channel would stall everything behind it.
+      reliable: false,
+      serialization: 'binary',
+      metadata: { id: App.id },
+    });
+    this.parentConn = conn;
+    conn.on('open', () => { this.onStatus('parent-linked'); });
+    conn.on('data', (d) => {
+      if (d instanceof ArrayBuffer || ArrayBuffer.isView(d)) { this.dispatch(d); return; }
+      if (d && d.k === 'hpr') {
+        this.hopRtt = Math.round((performance.now() - d.t) * 10) / 10;
+        this.send({ t: 'state', patch: { hopRtt: this.hopRtt } });
+      }
+    });
+    const lost = () => {
+      if (this.parentConn !== conn) return;
+      this.parentConn = null;
+      this.send({ t: 'reparent' });        // the host will re-plan the tree
+    };
+    conn.on('close', lost);
+    conn.on('error', lost);
+  },
+
+  /** Each node measures its own hop rather than trusting a global estimate. */
+  startHopProbe() {
+    clearInterval(this._hop);
+    this._hop = setInterval(() => {
+      const c = this.parentConn;
+      if (c && c.open) { try { c.send({ k: 'hp', t: performance.now() }); } catch {} }
+    }, 3000);
   },
 
   /** One inbound path for every transport: file chunks first, room traffic after. */
@@ -342,7 +441,7 @@ const Net = {
       // Live audio and file chunks share the channel; the magic tells them apart.
       const buf = m instanceof ArrayBuffer ? m : m.buffer.slice(m.byteOffset, m.byteOffset + m.byteLength);
       if (buf.byteLength > LIVE_HEADER && new DataView(buf).getUint32(0) === LIVE_MAGIC) {
-        Live.enqueue(buf);
+        Live.enqueue(buf, true);          // play it, and pass it to our children
         return;
       }
       m = buf;

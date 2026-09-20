@@ -42,6 +42,8 @@
       rtt: 0, ready: false, progress: 0, drift: 0, skew: 0,
       calib: null, battery: null, charging: false, net: null, awake: false,
       lat: null, tsrc: null,
+      peerId: opts.peerId || null,     // dialable address, for the distribution tree
+      parent: null, depth: 0, hopRtt: null,
       lastSeen: opts.joinedAt,
       pos: null,            // { x, y } metres, from the acoustic room map
     };
@@ -54,6 +56,7 @@
       rtt: d.rtt, ready: d.ready, progress: d.progress, drift: d.drift, skew: d.skew,
       calib: d.calib, battery: d.battery, charging: d.charging, net: d.net,
       awake: d.awake, pos: d.pos, lat: d.lat, tsrc: d.tsrc,
+      peerId: d.peerId, parent: d.parent, depth: d.depth, hopRtt: d.hopRtt,
     };
   }
 
@@ -88,6 +91,7 @@
       key: opts.key,
       name: opts.name,
       mode: opts.mode,
+      peerId: opts.peerId,
       joinedAt: ctx.now(),
       isHost: room.devices.size === 0 || !!opts.forceHost || !!(previous && previous.isHost),
     });
@@ -148,6 +152,8 @@
         num('skew', -1e4, 1e4); num('volume', 0, 3); num('trim', -500, 500, true);
         num('battery', 0, 100, true);
         num('lat', 0, 2000);
+        num('hopRtt', 0, 10000);
+        if (typeof p.peerId === 'string') device.peerId = p.peerId.slice(0, 64);
         if (typeof p.tsrc === 'string') device.tsrc = p.tsrc.slice(0, 12);
         if (typeof p.ready === 'boolean') device.ready = p.ready;
         if (typeof p.muted === 'boolean') device.muted = p.muted;

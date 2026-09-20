@@ -59,8 +59,9 @@ between two machines: playback cursors 0.1 ms apart, no late chunks.
 
 - The buffer is the **sync buffer** in the Sync tab. 700 ms is a good default;
   shorter feels more immediate and risks gaps on weak Wi-Fi.
-- Audio goes out as 16-bit PCM, about 1.4 Mbps per listener. Fine on a LAN,
-  and the live bar shows late chunks and resyncs if a link cannot keep up.
+- Audio goes out as Opus at about 130 kbps per listener (raw PCM if the browser
+  has no WebCodecs), and it is distributed through a tree rather than a star —
+  see below.
 - Channel modes still apply, so a streamed source can still be split into a
   stereo pair or a 5.1 layout.
 - **Mute the host's own speakers.** The source keeps playing out of the host
@@ -69,6 +70,48 @@ between two machines: playback cursors 0.1 ms apart, no late chunks.
   audio of a *Chrome tab* (so use Spotify/YouTube's web player), not the whole
   system — full system audio there needs a virtual device such as BlackHole.
   Chrome on **Windows** can share entire-screen audio.
+
+## Scaling to a roomful of devices
+
+A star cannot carry 50 devices, and the reason is not bandwidth. Wi-Fi hands out
+airtime **per station**: with 50 stations contending, the host is entitled to
+about 1/50 of the medium, while a star requires it to transmit 49 copies of
+every chunk — 49/50 of the airtime. No access point fixes that.
+
+| | per stream | host must send | verdict |
+|---|---|---|---|
+| PCM s16 | 1.41 Mbps | 69 Mbps | impossible |
+| Opus 128k, star | ~184 kbps on the wire | 8.8 Mbps | one station, 49 flows — fails under contention |
+| Opus 128k, fanout 4 | ~184 kbps | **736 kbps** | fits inside a 1/50 share |
+
+So two changes. **Opus** cuts each stream about elevenfold. **A distribution
+tree** spreads the transmitting across the stations that are already in the
+room: the host feeds four devices, each of those feeds four more. Fifty devices
+fit in three hops, and no device ever uploads more than ~736 kbps.
+
+Total airtime is the same either way — a star and a tree both have N−1 edges,
+about 9 Mbps aggregate, 5–10% of a 5 GHz channel. The tree changes *who*
+transmits, which is the thing that actually breaks.
+
+Relaying is free in sync terms, and that is the whole trick: every chunk already
+carries the instant it must be heard, so another hop changes when it *arrives*,
+never when it *plays*. Three hops spend about 24 ms of a 700 ms buffer.
+
+Each node looks after its own hop rather than trusting a global view: it probes
+its parent every few seconds, reports that round trip to the host, and asks to
+be re-parented when the link dies. The host re-plans the tree whenever anyone
+joins or leaves, and tells only the devices that actually moved.
+
+The clock deliberately does *not* go hop by hop. On one Wi-Fi network every
+device is a single radio hop from the host, so measuring against the host
+directly is more accurate than composing a chain of estimates — each hop would
+add its own error. Timing is star-shaped and cheap (about 1 kbps per device);
+only audio and failure handling are per-hop. On a multi-AP or mesh network that
+trade would flip, and boundary-clock style sync would win.
+
+Measured with four devices, one of them running a 48 kHz audio context against a
+44.1 kHz capture: **playback cursors within 0.22 ms**, zero re-anchors, zero
+gaps, Opus at 132 kbps.
 
 ## How the sync works
 
