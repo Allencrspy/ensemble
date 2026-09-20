@@ -237,7 +237,8 @@ const Engine = {
   ctx: null, analyser: null, graph: null, source: null, buffer: null,
   mode: 'stereo', volume: 1, muted: false, trim: 0,
   anchor: null,          // { x: ctx time at which `pos` is audible, pos }
-  rate: 1, lastError: 0, corrections: 0, hardResyncs: 0,
+  rate: 1, lastError: 0, corrections: 0, hardResyncs: 0, lateStarts: 0,
+  tsrc: 'unknown', tsLag: 0,
   metroOn: false, bpm: 100, metroAnchor: 0, beat: 0,
   calib: null, calibrating: false,
 
@@ -246,7 +247,7 @@ const Engine = {
   async unlock() {
     if (!this.ctx) {
       const AC = window.AudioContext || window.webkitAudioContext;
-      this.ctx = new AC({ latencyHint: 'playback' });
+      this.ctx = new AC({ latencyHint: 'interactive' });   // smallest buffer: timing beats power here
       this.analyser = this.ctx.createAnalyser();
       this.analyser.fftSize = 256;
       this.analyser.smoothingTimeConstant = 0.72;
@@ -262,6 +263,22 @@ const Engine = {
     return this.unlocked();
   },
 
+  diagnostics() {
+    const c = this.ctx;
+    return {
+      tsrc: this.tsrc,
+      tsLagMs: +(this.tsLag * 1000).toFixed(1),
+      outLatencyMs: +(this.outLatency() * 1000).toFixed(1),
+      baseLatencyMs: +((c && c.baseLatency ? c.baseLatency : 0) * 1000).toFixed(1),
+      sampleRate: c ? c.sampleRate : 0,
+      state: c ? c.state : 'none',
+      rate: +this.rate.toFixed(5),
+      errMs: +(this.lastError * 1000).toFixed(1),
+      lateStarts: this.lateStarts,
+      hardResyncs: this.hardResyncs,
+    };
+  },
+
   outLatency() {
     const c = this.ctx;
     const l = (typeof c.outputLatency === 'number' && c.outputLatency > 0) ? c.outputLatency : (c.baseLatency || 0);
@@ -274,10 +291,25 @@ const Engine = {
    * it already accounts for the output pipeline, so no latency term is added here.
    */
   audibleNow() {
-    const c = this.ctx;
-    const ts = c.getOutputTimestamp ? c.getOutputTimestamp() : null;
-    if (ts && ts.contextTime > 0 && ts.performanceTime > 0) return { c: ts.contextTime, p: ts.performanceTime };
-    return { c: c.currentTime - this.outLatency(), p: performance.now() };   // Safari fallback
+    const ctx = this.ctx;
+    const nowPerf = performance.now();
+    const ts = ctx.getOutputTimestamp ? ctx.getOutputTimestamp() : null;
+    if (ts) {
+      const ct = ts.contextTime, pt = ts.performanceTime;
+      const lag = ctx.currentTime - ct;    // audible frontier trails the render clock
+      const age = nowPerf - pt;            // how fresh this correlation is
+      // Every one of these has been seen in the wild: zeros, a performanceTime on
+      // a different epoch, a correlation that stopped updating. Any of them would
+      // put playback arbitrarily far out, so the pair has to be plausible first.
+      if (Number.isFinite(ct) && Number.isFinite(pt) && ct > 0 && pt > 0 &&
+          lag > -0.05 && lag < 1 && age > -50 && age < 1000) {
+        this.tsrc = 'timestamp';
+        this.tsLag = lag;
+        return { c: ct, p: pt };
+      }
+      this.tsrc = 'rejected';
+    } else this.tsrc = 'none';
+    return { c: ctx.currentTime - this.outLatency(), p: nowPerf };
   },
 
   /** Context time at which a sample must be scheduled to be *heard* at server time S. */
@@ -342,6 +374,7 @@ const Engine = {
 
     const want = this.scheduleAt(target) + this.trim / 1000;
     const when = Math.max(this.ctx.currentTime + 0.005, want);
+    if (when - want > 0.002) this.lateStarts++;      // we missed the window: buffer too short
     src.start(when, Math.max(0, pos));
     this.source = src;
     this.rate = 1;
@@ -356,7 +389,10 @@ const Engine = {
   correct(targetPosAtServerTime) {
     if (!this.source || !this.anchor) return 0;
     const { c, p } = this.audibleNow();
-    if (c < this.anchor.x) { this.lastError = 0; return 0; }   // still in the pre-roll
+    if (c < this.anchor.x) {
+      if (this.anchor.x - c < 5) { this.lastError = 0; return 0; }   // genuinely still in the pre-roll
+      this.anchor = { x: c, pos: this.anchor.pos };                  // nonsense anchor: let the error show
+    }
     const expected = targetPosAtServerTime(Clock.toServer(p)) - this.trim / 1000;
     const err = expected - this.heardPos(c);       // positive: we are running late
     this.lastError = err;

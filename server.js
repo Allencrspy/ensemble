@@ -301,6 +301,7 @@ server.on('upgrade', (req, socket) => {
 
   conn.onMessage = (msg) => {
     if (msg && msg.t === 'sync' && device) {           // answered first, always cheap
+      device.lastSeen = now();
       conn.send({ t: 'sync', c: msg.c, s: now() });
       return;
     }
@@ -329,6 +330,17 @@ server.on('upgrade', (req, socket) => {
     if (RoomCore.handle(room, device, msg, ctxFor(room))) pushRoster(room);
   };
 });
+
+// Same liveness policy as the peer-to-peer hub, so both transports behave alike.
+setInterval(() => {
+  for (const room of rooms.values()) {
+    for (const id of RoomCore.reap(room, now(), 25000)) {
+      const c = room.conns.get(id);
+      if (c) c.close(1000);
+      dropDevice(room, id);
+    }
+  }
+}, 5000);
 
 server.listen(PORT, () => {
   const addrs = lanAddresses();

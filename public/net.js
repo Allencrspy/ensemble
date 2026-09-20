@@ -69,6 +69,16 @@ class Hub {
 
   now() { return performance.now() - this.base; }
 
+  /** A phone that walks out of range never closes its channel cleanly. */
+  startReaper() {
+    clearInterval(this._reaper);
+    this._reaper = setInterval(() => {
+      for (const id of RoomCore.reap(this.room, this.now(), 25000)) {
+        if (this.links.has(id)) this.remove(id);
+      }
+    }, 5000);
+  }
+
   ctx() {
     const self = this;
     return {
@@ -210,6 +220,7 @@ const Net = {
       this.code = code;
       this.isHub = true;
       this.hub = new Hub(code);
+      this.hub.startReaper();
 
       // Remote devices arrive here; each gets its own link into the hub.
       peer.on('connection', (conn) => {

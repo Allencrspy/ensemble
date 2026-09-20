@@ -40,6 +40,8 @@
       volume: 1, muted: false, trim: 0,
       rtt: 0, ready: false, progress: 0, drift: 0, skew: 0,
       calib: null, battery: null, charging: false, net: null, awake: false,
+      lat: null, tsrc: null,
+      lastSeen: opts.joinedAt,
       pos: null,            // { x, y } metres, from the acoustic room map
     };
   }
@@ -50,7 +52,7 @@
       mode: d.mode, volume: d.volume, muted: d.muted, trim: d.trim,
       rtt: d.rtt, ready: d.ready, progress: d.progress, drift: d.drift, skew: d.skew,
       calib: d.calib, battery: d.battery, charging: d.charging, net: d.net,
-      awake: d.awake, pos: d.pos,
+      awake: d.awake, pos: d.pos, lat: d.lat, tsrc: d.tsrc,
     };
   }
 
@@ -105,6 +107,7 @@
    */
   function handle(room, device, msg, ctx) {
     const isHost = device.id === room.hostId;
+    device.lastSeen = ctx.now();
 
     switch (msg.t) {
       case 'sync':
@@ -120,6 +123,8 @@
         num('rtt', 0, 1e5); num('progress', 0, 1); num('drift', -1e5, 1e5);
         num('skew', -1e4, 1e4); num('volume', 0, 1); num('trim', -500, 500, true);
         num('battery', 0, 100, true);
+        num('lat', 0, 2000);
+        if (typeof p.tsrc === 'string') device.tsrc = p.tsrc.slice(0, 12);
         if (typeof p.ready === 'boolean') device.ready = p.ready;
         if (typeof p.muted === 'boolean') device.muted = p.muted;
         if (typeof p.charging === 'boolean') device.charging = p.charging;
@@ -232,5 +237,14 @@
     }
   }
 
-  return { CODE_ALPHABET, makeCode, createRoom, createDevice, publicDevice, snapshot, join, leave, setTrack, handle };
+  /** Devices that have said nothing for a while are gone, whatever the socket thinks. */
+  function reap(room, nowMs, maxSilenceMs) {
+    const dead = [];
+    for (const d of room.devices.values()) {
+      if (nowMs - d.lastSeen > maxSilenceMs) dead.push(d.id);
+    }
+    return dead;
+  }
+
+  return { CODE_ALPHABET, makeCode, reap, createRoom, createDevice, publicDevice, snapshot, join, leave, setTrack, handle };
 }));

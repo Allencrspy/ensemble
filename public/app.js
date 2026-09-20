@@ -696,6 +696,8 @@ function renderDevices() {
       extra.push(`<span class="bat${d.battery <= 20 && !d.charging ? ' low' : ''}">${d.battery}%${d.charging ? ' ⚡' : ''}</span>`);
     }
     if (d.awake) extra.push('screen held');
+    if (typeof d.lat === 'number' && d.lat > 0) extra.push(`${Math.round(d.lat)} ms out`);
+    if (d.tsrc === 'rejected' || d.tsrc === 'none') extra.push('<span class="warn">est. timing</span>');
     return `
       <div class="device${d.isHost ? ' is-host' : ''}">
         <div class="avatar">${(d.name[0] || '?').toUpperCase()}</div>
@@ -827,7 +829,14 @@ function syncTick() {
   const t = performance.now();
   if (t - lastReport > 1500) {
     lastReport = t;
-    if (Clock.ready) pushState({ rtt: Clock.rtt, skew: Clock.ppm(), drift: Engine.source ? Engine.lastError * 1000 : 0 });
+    if (Clock.ready) {
+      const d = Engine.diagnostics();
+      pushState({
+        rtt: Clock.rtt, skew: Clock.ppm(),
+        drift: Engine.source ? Engine.lastError * 1000 : 0,
+        lat: d.outLatencyMs, tsrc: d.tsrc,
+      });
+    }
   }
 }
 
@@ -1062,6 +1071,29 @@ function wireSession() {
 
   $$('#buffer-seg button').forEach((b) => b.addEventListener('click', () => send({ t: 'buffer', ms: Number(b.dataset.ms) })));
   $('#btn-resync').addEventListener('click', () => { send({ t: 'resync' }); toast('Re-anchoring every device'); });
+
+  $('#btn-diag').addEventListener('click', async () => {
+    const text = JSON.stringify({
+      when: new Date().toISOString(),
+      transport: Net.mode,
+      ua: navigator.userAgent,
+      clock: {
+        ready: Clock.ready, rttMs: +Clock.rtt.toFixed(2),
+        jitterMs: +(Clock.jitter() || 0).toFixed(2), skewPpm: +Clock.ppm().toFixed(1),
+        samples: Clock.samples.length,
+      },
+      engine: Engine.diagnostics(),
+      playback: App.room.playback,
+      syncBufferMs: App.room.syncBuffer,
+      devices: App.room.devices.map((d) => ({
+        name: d.name, host: d.isHost, mode: d.mode, ready: d.ready,
+        rttMs: d.rtt, driftMs: d.drift, trimMs: d.trim, skewPpm: d.skew,
+        outLatencyMs: d.lat, timeSource: d.tsrc, calibMs: d.calib,
+      })),
+    }, null, 2);
+    try { await navigator.clipboard.writeText(text); toast('Diagnostics copied'); }
+    catch { console.log(text); toast('Diagnostics printed to the console'); }
+  });
 
   $('#btn-autoalign').addEventListener('click', () => {
     const measured = App.room.devices.filter((d) => typeof d.calib === 'number');
