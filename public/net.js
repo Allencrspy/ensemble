@@ -276,18 +276,40 @@ const Net = {
     const code = String(opts.code || '').toUpperCase();
     const peer = new Peer({ debug: 0 });
     this.peer = peer;
+
+    let lastPeerError = null;
+    peer.on('error', (e) => { lastPeerError = e && e.type; });
+
     await new Promise((res, rej) => {
       peer.on('open', res);
-      peer.on('error', (e) => rej(new Error(e.type === 'network' ? 'Cannot reach the signalling service' : e.type)));
-      setTimeout(() => rej(new Error('Signalling timed out')), 12000);
+      peer.on('error', (e) => rej(new Error(e.type === 'network'
+        ? 'Cannot reach the signalling service — check this device is online'
+        : `Signalling failed (${e.type})`)));
+      setTimeout(() => rej(new Error('Signalling timed out — check this device is online')), 15000);
     });
 
     const conn = peer.connect(PEER_PREFIX + code, { reliable: true, serialization: 'binary' });
+
     await new Promise((res, rej) => {
       conn.on('open', res);
-      peer.on('error', (e) => rej(new Error(
-        e.type === 'peer-unavailable' ? `No session named ${code}` : e.type)));
-      setTimeout(() => rej(new Error('That session did not answer')), 15000);
+      peer.on('error', (e) => {
+        if (e.type === 'peer-unavailable') rej(new Error(`No session called ${code} — check the code, and that the host still has the page open`));
+        else rej(new Error(`Could not connect (${e.type})`));
+      });
+      // A join that gets this far and still fails is nearly always the network
+      // refusing to carry device-to-device traffic, so say that rather than
+      // leaving someone staring at a spinner.
+      setTimeout(() => {
+        if (lastPeerError === 'peer-unavailable') {
+          rej(new Error(`No session called ${code} — check the code and that the host is still open`));
+          return;
+        }
+        const pc = conn.peerConnection;
+        const ice = pc ? pc.iceConnectionState : 'none';
+        rej(new Error(ice === 'checking' || ice === 'new'
+          ? 'Found the session but could not open a direct link. Both devices must be on the same Wi-Fi, and guest networks often block devices from talking to each other.'
+          : `The session did not answer (link state: ${ice})`));
+      }, 20000);
     });
 
     const link = new PeerLink(conn);

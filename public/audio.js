@@ -22,6 +22,17 @@ const fmt = (s) => {
 };
 const svg = (d) => `<svg viewBox="0 0 24 24" fill="none">${d}</svg>`;
 
+/* Some browsers — locked-down profiles, in-app webviews with storage blocked —
+   throw on any localStorage access. Every preference here is a convenience, so
+   losing them is fine; taking the whole app down with a SecurityError is not. */
+const store = {
+  get(key, fallback = null) {
+    try { const v = localStorage.getItem(key); return v === null ? fallback : v; }
+    catch { return fallback; }
+  },
+  set(key, value) { try { localStorage.setItem(key, String(value)); } catch {} },
+};
+
 /* ───────────────────────────── channel modes ───────────────────────────── */
 
 const MODES = [

@@ -9,8 +9,8 @@
    warning the host about, and the motion sensors make good remote controls. */
 
 const Sensors = {
-  wakeLock: null, wakeWanted: localStorage.getItem('ensemble.wake') !== '0',
-  motionOn: false, hapticOn: localStorage.getItem('ensemble.haptic') === '1',
+  wakeLock: null, wakeWanted: store.get('ensemble.wake') !== '0',
+  motionOn: false, hapticOn: store.get('ensemble.haptic') === '1',
   battery: null, lastShake: 0, faceDownSince: 0, faceDownMuted: false,
   lastPulse: 0,
 
@@ -35,7 +35,7 @@ const Sensors = {
     }
     sw.addEventListener('click', () => {
       this.wakeWanted = !this.wakeWanted;
-      localStorage.setItem('ensemble.wake', this.wakeWanted ? '1' : '0');
+      store.set('ensemble.wake', this.wakeWanted ? '1' : '0');
       this.wakeWanted ? this.acquireWake() : this.releaseWake();
       this.render();
     });
@@ -185,7 +185,7 @@ const Sensors = {
     }
     sw.addEventListener('click', () => {
       this.hapticOn = !this.hapticOn;
-      localStorage.setItem('ensemble.haptic', this.hapticOn ? '1' : '0');
+      store.set('ensemble.haptic', this.hapticOn ? '1' : '0');
       if (this.hapticOn) navigator.vibrate(25);
       this.render();
     });
@@ -218,18 +218,18 @@ const App = {
   ws: null, id: null, room: null, connected: false,
   loadedTrackId: null, loadingTrackId: null, pendingBytes: null,
   appliedPlayback: '', scrubbing: false, lanInfo: null,
-  name: localStorage.getItem('ensemble.name') || '',
+  name: store.get('ensemble.name') || '',
   key: (() => {
-    let k = localStorage.getItem('ensemble.key');
+    let k = store.get('ensemble.key');
     if (!k) {
       k = (crypto.randomUUID ? crypto.randomUUID() : String(Math.random()) + Date.now()).replace(/-/g, '').slice(0, 24);
-      localStorage.setItem('ensemble.key', k);
+      store.set('ensemble.key', k);
     }
     return k;
   })(),
-  mode: normalizeMode(localStorage.getItem('ensemble.mode') || 'stereo'),
-  trim: Number(localStorage.getItem('ensemble.trim') || 0),
-  volume: Number(localStorage.getItem('ensemble.volume') || 1),
+  mode: normalizeMode(store.get('ensemble.mode') || 'stereo'),
+  trim: Number(store.get('ensemble.trim') || 0),
+  volume: Number(store.get('ensemble.volume') || 1),
   muted: false,
 };
 const me = () => App.room && App.room.devices.find((d) => d.id === App.id);
@@ -299,11 +299,11 @@ function handleMessage(m) {
       if (p.mode) {
         App.mode = p.mode; Engine.setMode(p.mode);
         App.modeGroup = (MODE_BY_ID[p.mode] || {}).group || 'room';
-        localStorage.setItem('ensemble.mode', p.mode);
+        store.set('ensemble.mode', p.mode);
       }
       if (typeof p.volume === 'number') { App.volume = p.volume; Engine.setVolume(p.volume); }
       if (typeof p.muted === 'boolean') { App.muted = p.muted; Engine.setMuted(p.muted); }
-      if (typeof p.trim === 'number') { App.trim = p.trim; Engine.setTrim(p.trim); localStorage.setItem('ensemble.trim', p.trim); }
+      if (typeof p.trim === 'number') { App.trim = p.trim; Engine.setTrim(p.trim); store.set('ensemble.trim', p.trim); }
       syncSelfControls();
       toast('Host adjusted this device');
       break;
@@ -592,8 +592,8 @@ function wireMap() {
         App.mode = role; App.modeGroup = (MODE_BY_ID[role] || {}).group || 'room';
         Engine.setMode(role); Engine.setTrim(trim);
         App.trim = trim;
-        localStorage.setItem('ensemble.mode', role);
-        localStorage.setItem('ensemble.trim', trim);
+        store.set('ensemble.mode', role);
+        store.set('ensemble.trim', trim);
         pushState({ mode: role, trim });
         syncSelfControls();
       } else {
@@ -612,7 +612,12 @@ function show(which) {
   $('#session').hidden = which !== 'session';
 }
 function showGate() { $('#gate').hidden = false; }
-function landingError(msg) { const e = $('#landing-error'); e.textContent = msg; e.hidden = false; }
+function landingError(msg) {
+  const e = $('#landing-error');
+  e.textContent = msg;
+  e.hidden = false;
+  $('#btn-join').textContent = 'Try again';
+}
 function setBadge(text) { $('#art-badge').textContent = text; }
 function setSyncPill(cls, text) {
   const p = $('#sync-pill');
@@ -643,7 +648,7 @@ function renderModes() {
 
   $$('.mode', wrap).forEach((b) => b.addEventListener('click', () => {
     App.mode = b.dataset.mode;
-    localStorage.setItem('ensemble.mode', App.mode);
+    store.set('ensemble.mode', App.mode);
     Engine.setMode(App.mode);
     pushState({ mode: App.mode });
     renderModes();
@@ -966,7 +971,7 @@ function wireLanding() {
   nameInput.placeholder = defaultName();
   nameInput.addEventListener('input', () => {
     App.name = nameInput.value.trim().slice(0, 24);
-    localStorage.setItem('ensemble.name', App.name);
+    store.set('ensemble.name', App.name);
   });
 
   const boxes = $$('#code-input input');
@@ -1004,8 +1009,12 @@ function wireLanding() {
     const btn = $('#btn-join');
     btn.disabled = true; btn.textContent = 'Joining…';
     await Engine.unlock().catch(() => {});
-    try { await connectRoom({ create: false, code }); }
-    catch {} finally { btn.disabled = false; btn.textContent = 'Join'; }
+    try {
+      await connectRoom({ create: false, code });
+      btn.textContent = 'Join';
+    } catch {
+      btn.textContent = 'Try again';       // landingError already said why
+    } finally { btn.disabled = false; }
   }
 
   Net.detectMode().then((mode) => {
@@ -1067,7 +1076,7 @@ function wireSession() {
   vol.addEventListener('input', () => {
     App.volume = Number(vol.value) / 100;
     Engine.setVolume(App.volume);
-    localStorage.setItem('ensemble.volume', App.volume);
+    store.set('ensemble.volume', App.volume);
     $('#vol-value').textContent = vol.value + '%';
     fillRange(vol);
   });
@@ -1085,7 +1094,7 @@ function wireSession() {
     trim.value = App.trim; fillRange(trim);
     $('#trim-value').textContent = (App.trim > 0 ? '+' : '') + App.trim + ' ms';
     Engine.setTrim(App.trim);
-    localStorage.setItem('ensemble.trim', App.trim);
+    store.set('ensemble.trim', App.trim);
     if (push) pushState({ trim: App.trim });
   };
   trim.addEventListener('input', () => setTrim(Number(trim.value), false));
@@ -1121,7 +1130,7 @@ function wireSession() {
       const mode = plan[i] || 'mono';
       if (d.id === App.id) {
         App.mode = mode; App.modeGroup = (MODE_BY_ID[mode] || {}).group || 'room';
-        Engine.setMode(mode); localStorage.setItem('ensemble.mode', mode);
+        Engine.setMode(mode); store.set('ensemble.mode', mode);
         pushState({ mode });
         renderModes();
       } else send({ t: 'device', id: d.id, mode });
