@@ -44,6 +44,32 @@ The app picks its mode automatically; `?mode=p2p` or `?mode=ws` forces one.
 > secure context. That means the hosted build, or `localhost` — a plain-http LAN
 > address cannot use `getUserMedia`, and the app will tell you so.
 
+## Live streaming
+
+The host can stream whatever it is playing instead of sharing a file. **Stream
+what I'm playing** opens the browser's share picker; pick a tab (or a screen)
+and tick the audio box.
+
+It is not a voice call under the hood. The host captures the audio, cuts it into
+23 ms chunks, and stamps each one with the instant it should be *heard* —
+capture time plus a fixed buffer. Every device, the host included, schedules
+that chunk for exactly that instant. Nobody plays a chunk when it arrives; they
+play it when the clock says to, which is what keeps the room together. Measured
+between two machines: playback cursors 0.1 ms apart, no late chunks.
+
+- The buffer is the **sync buffer** in the Sync tab. 700 ms is a good default;
+  shorter feels more immediate and risks gaps on weak Wi-Fi.
+- Audio goes out as 16-bit PCM, about 1.4 Mbps per listener. Fine on a LAN,
+  and the live bar shows late chunks and resyncs if a link cannot keep up.
+- Channel modes still apply, so a streamed source can still be split into a
+  stereo pair or a 5.1 layout.
+- **Mute the host's own speakers.** The source keeps playing out of the host
+  directly, with no delay, so if you do not mute it you will hear the room twice.
+- What can be captured depends on the browser: Chrome on **macOS** can take the
+  audio of a *Chrome tab* (so use Spotify/YouTube's web player), not the whole
+  system — full system audio there needs a virtual device such as BlackHole.
+  Chrome on **Windows** can share entire-screen audio.
+
 ## How the sync works
 
 Streaming audio to N devices and hoping they keep up does not work: every device

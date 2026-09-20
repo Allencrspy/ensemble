@@ -79,9 +79,10 @@
   }
 
   function join(room, ctx, opts) {
-    // The transport has usually already unlisted the old entry, so it hands the
-    // object over directly; fall back to a lookup when it has not.
-    const previous = opts.inherit || findByKey(room, opts.key);
+    // Only ever inherit from an entry the transport actually retired and handed
+    // over. Looking it up here instead would let a device that is still listed —
+    // the hub's own tab, say — be inherited from, producing two hosts.
+    const previous = opts.inherit || null;
     const device = createDevice({
       id: opts.id,
       key: opts.key,
@@ -205,6 +206,19 @@
           anchorPos: Math.max(0, Number(msg.position) || 0),
           bpm: room.playback.bpm,
         };
+        ctx.broadcast({ t: 'playback', playback: room.playback, serverNow: ctx.now() });
+        return true;
+      }
+      case 'live': {
+        room.playback = msg.on
+          ? {
+              mode: 'live', trackId: null, anchorServer: ctx.now(), anchorPos: 0,
+              bpm: room.playback.bpm, rate: Number(msg.rate) || 48000,
+              channels: Number(msg.channels) || 2,
+              liveBufferMs: clamp(Number(msg.bufferMs) || 700, 120, 3000),
+              source: device.id,
+            }
+          : { mode: 'idle', trackId: room.track ? room.track.id : null, anchorServer: ctx.now(), anchorPos: 0, bpm: room.playback.bpm };
         ctx.broadcast({ t: 'playback', playback: room.playback, serverNow: ctx.now() });
         return true;
       }

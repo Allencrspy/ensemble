@@ -83,6 +83,7 @@ class Conn {
     this.fragOp = 0;
     this.alive = true;
     this.onMessage = () => {};
+    this.onBinary = () => {};
     this.onClose = () => {};
 
     socket.on('data', (chunk) => {
@@ -127,6 +128,10 @@ class Conn {
       if (opcode === 0x9) { this.frame(0xA, payload); continue; }
       if (opcode === 0xA) { this.alive = true; continue; }
 
+      if (opcode === 0x2) {                 // live audio chunk
+        this.onBinary(payload);
+        continue;
+      }
       if (opcode === 0x0) {
         if (!this.frag) throw new Error('unexpected continuation');
         this.frag = Buffer.concat([this.frag, payload]);
@@ -159,6 +164,10 @@ class Conn {
 
   sendRaw(str) { this.frame(0x1, Buffer.from(str, 'utf8')); }
   send(obj) { this.sendRaw(JSON.stringify(obj)); }
+  sendBinary(buf) {
+    if (this.socket.writableLength > 4 * 1024 * 1024) return;   // drop rather than queue audio
+    this.frame(0x2, buf);
+  }
 
   close(code = 1000) {
     if (this.socket.destroyed) return;
@@ -298,6 +307,12 @@ server.on('upgrade', (req, socket) => {
   let room = null;
 
   conn.onClose = () => { if (room && device) dropDevice(room, device.id); };
+
+  // Live audio: only the host produces it, and it goes straight out to the others.
+  conn.onBinary = (payload) => {
+    if (!room || !device || device.id !== room.hostId) return;
+    for (const [id, c] of room.conns) if (id !== device.id) c.sendBinary(payload);
+  };
 
   conn.onMessage = (msg) => {
     if (msg && msg.t === 'sync' && device) {           // answered first, always cheap

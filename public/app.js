@@ -424,7 +424,22 @@ function applyPlayback() {
   App.appliedPlayback = key;
 
   if (pb.mode !== 'metronome' && Engine.metroOn) Engine.stopMetronome();
-  if (!Engine.unlocked()) { if (pb.mode === 'playing' || pb.mode === 'metronome') showGate(); return; }
+  if (pb.mode !== 'live' && Live.on && !Live.sending) Live.end();
+  if (pb.mode !== 'live' && Live.sending) {
+    // A snapshot older than our own 'live on' message. Say it again rather than
+    // tearing down a capture the user just started.
+    if (performance.now() - (Live.announcedAt || 0) > 1500) {
+      Live.announcedAt = performance.now();
+      send({ t: 'live', on: true, rate: Live.rate, channels: Live.channels, bufferMs: Live.bufferMs });
+    }
+  }
+  if (!Engine.unlocked()) { if (pb.mode !== 'idle' && pb.mode !== 'paused') showGate(); return; }
+
+  if (pb.mode === 'live') {
+    Engine.stop();
+    if (changed || !Live.on) Live.begin({ rate: pb.rate, channels: pb.channels, bufferMs: pb.liveBufferMs });
+    return;
+  }
 
   if (pb.mode === 'metronome') {
     if (changed || !Engine.metroOn) { Engine.stop(); Engine.startMetronome(pb.anchorServer, pb.bpm || 100); }
@@ -670,13 +685,30 @@ function renderRoom() {
   const self = me();
   if (self) $('#self-name-chip').textContent = self.name + (isHost() ? ' · host' : '');
 
-  const tr = App.room.track;
-  $('#track-title').textContent = tr ? tr.name.replace(/\.[a-z0-9]+$/i, '') : 'Nothing loaded';
-  $('#track-sub').textContent = tr
-    ? `${(tr.size / 1048576).toFixed(1)} MB · shared with ${App.room.devices.length} device${App.room.devices.length === 1 ? '' : 's'}`
-    : (isHost() ? 'Drop an audio file below to share it with the room.' : 'Waiting for the host to add a track.');
+  const live = playback().mode === 'live';
+  const liveHost = live && App.room.devices.find((d) => d.id === playback().source);
+  $('#live-bar').hidden = !live;
+  if (live) {
+    $('#live-text').textContent = Live.sending
+      ? 'Live — streaming this device'
+      : `Live from ${liveHost ? liveHost.name : 'the host'}`;
+  }
+  $('#btn-live').textContent = Live.sending ? 'Stop streaming' : 'Stream what I\u2019m playing';
+  $('#scrub').hidden = live;
+  $('#time-cur').parentElement.hidden = live;
+  $('#dropzone').hidden = live;
 
-  const canPlay = isHost() && !!tr;
+  const tr = App.room.track;
+  $('#track-title').textContent = live
+    ? (liveHost ? `Live from ${liveHost.name}` : 'Live')
+    : (tr ? tr.name.replace(/\.[a-z0-9]+$/i, '') : 'Nothing loaded');
+  $('#track-sub').textContent = live
+    ? `Streaming to ${App.room.devices.length - 1} other device${App.room.devices.length === 2 ? '' : 's'} · ${playback().liveBufferMs} ms behind the source`
+    : (tr
+      ? `${(tr.size / 1048576).toFixed(1)} MB · shared with ${App.room.devices.length} device${App.room.devices.length === 1 ? '' : 's'}`
+      : (isHost() ? 'Drop an audio file below to share it with the room.' : 'Waiting for the host to add a track.'));
+
+  const canPlay = isHost() && !!tr && !live;
   $('#btn-play').disabled = !canPlay;
   $('#btn-back15').disabled = !canPlay;
   $('#btn-fwd15').disabled = !canPlay;
@@ -685,7 +717,7 @@ function renderRoom() {
   const pl = playback().mode === 'playing';
   $('#btn-play').querySelector('.i-play').toggleAttribute('hidden', pl);
   $('#btn-play').querySelector('.i-pause').toggleAttribute('hidden', !pl);
-  $('#art').classList.toggle('playing', pl || playback().mode === 'metronome');
+  $('#art').classList.toggle('playing', pl || playback().mode === 'metronome' || live);
   $('#btn-metro').textContent = playback().mode === 'metronome' ? 'Stop sync test tone' : 'Play sync test tone';
 
   $$('#buffer-seg button').forEach((b) => b.classList.toggle('sel', Number(b.dataset.ms) === App.room.syncBuffer));
@@ -822,7 +854,13 @@ function frame() {
     });
   }
 
-  if (pb.mode === 'idle' || pb.mode === 'paused') setBadge(Engine.buffer ? 'Ready' : (App.room.track ? 'Loading…' : 'No track'));
+  if (pb.mode === 'live') {
+    setBadge('Live · ' + ((MODE_BY_ID[App.mode] || {}).label || ''));
+    const d = Live.diagnostics();
+    $('#live-stats').textContent = Live.sending
+      ? `${d.chunkMs} ms chunks · ${d.kbps} kbps`
+      : `${d.played} chunks · ${d.late} late · ${d.reanchors} resyncs`;
+  } else if (pb.mode === 'idle' || pb.mode === 'paused') setBadge(Engine.buffer ? 'Ready' : (App.room.track ? 'Loading…' : 'No track'));
   else if (pb.mode === 'metronome') setBadge('Sync test');
   else setBadge('Playing · ' + ((MODE_BY_ID[App.mode] || {}).label || ''));
 
@@ -1086,7 +1124,11 @@ function wireSession() {
     toast(`${list.length}-speaker layout: ${plan.slice(0, list.length).map((m) => (MODE_BY_ID[m] || {}).short || MODE_BY_ID[m].label).join(' · ')}`);
   });
 
-  $$('#buffer-seg button').forEach((b) => b.addEventListener('click', () => send({ t: 'buffer', ms: Number(b.dataset.ms) })));
+  $$('#buffer-seg button').forEach((b) => b.addEventListener('click', () => {
+    const ms = Number(b.dataset.ms);
+    send({ t: 'buffer', ms });
+    if (Live.sending) Live.bufferMs = ms;      // takes effect on the next chunk
+  }));
   $('#btn-resync').addEventListener('click', () => { send({ t: 'resync' }); toast('Re-anchoring every device'); });
 
   $('#btn-diag').addEventListener('click', async () => {
@@ -1100,6 +1142,7 @@ function wireSession() {
         samples: Clock.samples.length,
       },
       engine: Engine.diagnostics(),
+      live: Live.diagnostics(),
       playback: App.room.playback,
       syncBufferMs: App.room.syncBuffer,
       devices: App.room.devices.map((d) => ({
@@ -1130,6 +1173,23 @@ function wireSession() {
   dz.addEventListener('drop', (ev) => uploadFile(ev.dataTransfer.files[0]));
   window.addEventListener('dragover', (e) => e.preventDefault());
   window.addEventListener('drop', (e) => e.preventDefault());
+
+  $('#btn-live').addEventListener('click', async () => {
+    if (!isHost()) return;
+    if (Live.sending) { Live.stopCapture(); renderRoom(); return; }
+    const btn = $('#btn-live');
+    btn.disabled = true;
+    try {
+      Live.bufferMs = App.room.syncBuffer;
+      await Live.startCapture();
+      toast('Streaming — mute this device\u2019s own speakers to avoid hearing it twice', 6000);
+    } catch (e) {
+      toast(e.message || 'Could not capture audio');
+    } finally {
+      btn.disabled = false;
+      renderRoom();
+    }
+  });
 
   $('#btn-metro').addEventListener('click', () => {
     if (!isHost()) return;

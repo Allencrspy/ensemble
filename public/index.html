@@ -72,6 +72,12 @@
         <span class="art-badge" id="art-badge">No track</span>
       </div>
 
+      <div class="live-bar" id="live-bar" hidden>
+        <span class="live-dot"></span>
+        <span class="live-text" id="live-text">Live</span>
+        <span class="live-stats" id="live-stats"></span>
+      </div>
+
       <div class="track-meta">
         <h2 id="track-title">Nothing loaded</h2>
         <p id="track-sub">The host shares a track, every device caches it, then it plays everywhere at once.</p>
@@ -102,7 +108,10 @@
           <span id="dropzone-text">Drop an audio file, or choose one</span>
         </label>
         <div class="upload-bar" id="upload-bar" hidden><i style="width:0%"></i></div>
-        <button class="btn ghost small wide" id="btn-metro">Play sync test tone</button>
+        <div class="btn-row split">
+          <button class="btn ghost small" id="btn-live">Stream what I'm playing</button>
+          <button class="btn ghost small" id="btn-metro">Sync test tone</button>
+        </div>
       </div>
     </section>
 
@@ -292,6 +301,7 @@
 <script src="audio.js"></script>
 <script src="acoustic.js"></script>
 <script src="position.js"></script>
+<script src="live.js"></script>
 <script src="net.js"></script>
 <script src="app.js"></script>
 </body>

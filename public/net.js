@@ -48,11 +48,16 @@ class WSLink {
     this.onMessage = () => {};
     this.onClose = () => {};
     this.ws = new WebSocket(url);
-    this.ws.onmessage = (e) => { try { this.onMessage(JSON.parse(e.data)); } catch {} };
+    this.ws.binaryType = 'arraybuffer';
+    this.ws.onmessage = (e) => {
+      if (e.data instanceof ArrayBuffer) { this.onMessage(e.data); return; }
+      try { this.onMessage(JSON.parse(e.data)); } catch {}
+    };
     this.ws.onclose = () => this.onClose();
   }
   get ready() { return this.ws.readyState === 1; }
   send(msg) { if (this.ready) this.ws.send(JSON.stringify(msg)); }
+  sendBinary(buf) { if (this.ready && this.ws.bufferedAmount < 2e6) this.ws.send(buf); }
   close() { try { this.ws.close(); } catch {} }
 }
 
@@ -296,9 +301,30 @@ const Net = {
 
   send(msg) { if (this.link) this.link.send(msg); },
 
+  /** Host only: push a live audio chunk to every other device. */
+  broadcastBinary(buf) {
+    if (this.isHub && this.hub) {
+      for (const [id, l] of this.hub.links) {
+        if (id === this.localId) continue;
+        try { l.send(buf); } catch {}
+      }
+      return;
+    }
+    if (this.link && this.link.sendBinary) this.link.sendBinary(buf);   // LAN: the server relays
+  },
+
   /** One inbound path for every transport: file chunks first, room traffic after. */
   dispatch(m) {
     const binary = m instanceof ArrayBuffer || ArrayBuffer.isView(m);
+    if (binary) {
+      // Live audio and file chunks share the channel; the magic tells them apart.
+      const buf = m instanceof ArrayBuffer ? m : m.buffer.slice(m.byteOffset, m.byteOffset + m.byteLength);
+      if (buf.byteLength > LIVE_HEADER && new DataView(buf).getUint32(0) === LIVE_MAGIC) {
+        Live.enqueue(buf);
+        return;
+      }
+      m = buf;
+    }
     const tr = this.transfer;
     if (tr) {
       if (binary) { tr.chunk(m); return; }

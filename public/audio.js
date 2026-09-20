@@ -312,6 +312,12 @@ const Engine = {
     return { c: ctx.currentTime - this.outLatency(), p: nowPerf };
   },
 
+  /** Server time at which the sample sitting at context time `c` is heard. */
+  serverTimeOfCtx(c) {
+    const { c: ac, p } = this.audibleNow();
+    return Clock.toServer(p + (c - ac) * 1000);
+  },
+
   /** Context time at which a sample must be scheduled to be *heard* at server time S. */
   scheduleAt(serverMs) {
     const { c, p } = this.audibleNow();
