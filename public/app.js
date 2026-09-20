@@ -834,8 +834,9 @@ function syncTick() {
 function renderStats() {
   if (!App.room) return;
   const q = Clock.rtt;
-  if (Clock.ready) setSyncPill(q < 40 ? 'good' : (q < 140 ? '' : 'bad'), `${q.toFixed(0)} ms rtt`);
-  else setSyncPill('', 'syncing…');
+  if (!Clock.ready) setSyncPill('', 'syncing…');
+  else if (Net.isHub && q < 0.25) setSyncPill('good', 'reference clock');
+  else setSyncPill(q < 40 ? 'good' : (q < 140 ? '' : 'bad'), `${q < 1 ? q.toFixed(1) : q.toFixed(0)} ms rtt`);
 
   const jit = Clock.jitter();
   const jitEl = $('#st-offset');

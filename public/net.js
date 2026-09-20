@@ -147,11 +147,19 @@ const Net = {
   onMessage: () => {},
   onStatus: () => {},
 
-  /** LAN when a Node server answers, peer-to-peer otherwise (e.g. GitHub Pages). */
+  /**
+   * LAN when a Node server answers, peer-to-peer otherwise (e.g. GitHub Pages).
+   * Only a local address is probed — a public host is never running this
+   * server, and the probe would just log a 404. Force it with ?mode=ws.
+   */
   async detectMode() {
     if (/[?&]mode=p2p/.test(location.search)) return 'p2p';
     if (/[?&]mode=ws/.test(location.search)) return 'ws';
     if (location.protocol === 'file:') return 'p2p';
+    const h = location.hostname;
+    const localish = /^(localhost|127\.0\.0\.1|\[::1\]|0\.0\.0\.0)$/.test(h) ||
+      /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(h) || /\.local$/.test(h);
+    if (!localish) return 'p2p';
     try {
       const ctl = new AbortController();
       const timer = setTimeout(() => ctl.abort(), 1500);
