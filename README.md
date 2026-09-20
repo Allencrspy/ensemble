@@ -113,6 +113,32 @@ Measured with four devices, one of them running a 48 kHz audio context against a
 44.1 kHz capture: **playback cursors within 0.22 ms**, zero re-anchors, zero
 gaps, Opus at 132 kbps.
 
+## Latency
+
+Delay and scale are the same dial, because Wi-Fi airtime is dominated by
+per-frame overhead rather than payload. Halving the Opus frame halves the
+latency floor and doubles the packet rate, and packets are what saturate the
+medium — so the room's size picks the frame size automatically (5–10 ms for a
+handful of devices, 40–60 ms for a crowd). Frames must also be a whole number
+of samples at the capture rate: 5 ms at 44.1 kHz is 220.5 samples, and rounding
+that slips the stream 2.6 ms every second.
+
+The buffer is measured, not guessed. Every listener reports the slack its worst
+chunk had — how long before its deadline it actually arrived — and **Calibrate
+latency** walks the buffer down 20 ms at a time until the first device runs out
+of margin or drops a sample, then settles at that floor plus a margin. In normal
+running the buffer only ever goes *up*, and quickly: a continuously descending
+buffer has every device chasing a moving target, which turned 0.2 ms of spread
+into 9 ms. Find the floor deliberately, then hold it.
+
+A device that struggles alone asks the host for a **second parent** rather than
+making everyone else wait: two disjoint paths, and whichever copy of a chunk
+lands first wins. That halves nothing on average and everything in the tail,
+which is where dropouts live.
+
+Measured on a three-device room: 700 ms → **173 ms** buffer, cursors within
+**0.35 ms**, zero gaps.
+
 ## How the sync works
 
 Streaming audio to N devices and hoping they keep up does not work: every device

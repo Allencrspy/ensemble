@@ -311,7 +311,8 @@ function handleMessage(m) {
     case 'parent':
       // The host has told us where our audio comes from. Root feeds itself.
       Net.depth = m.depth || 0;
-      if (m.parentPeer) Net.connectParent(m.parentPeer, m.parentId);
+      if (m.parentPeer) Net.connectParent(m.parentPeer, m.parentId, 'primary');
+      if (m.backupPeer) Net.connectParent(m.backupPeer, m.backupId, 'backup');
       break;
     case 'relayed': handleRelay(m.from, m.payload); break;
     case 'promoted': toast('You are the host now'); renderShare(); break;
@@ -761,6 +762,9 @@ function renderDevices() {
     }
     if (d.awake) extra.push('screen held');
     if (d.depth) extra.push(`hop ${d.depth}${typeof d.hopRtt === 'number' ? ` · ${d.hopRtt} ms` : ''}`);
+    if (typeof d.slack === 'number') {
+      extra.push(`<span class="${d.slack < 40 ? 'warn' : 'ok'}">${d.slack} ms slack</span>`);
+    }
     if (typeof d.lat === 'number' && d.lat > 0) extra.push(`${Math.round(d.lat)} ms out`);
     if (d.tsrc === 'rejected' || d.tsrc === 'none') extra.push('<span class="warn">est. timing</span>');
     return `
@@ -827,7 +831,7 @@ function initBars() {
   barEls.push(...$$('i', b));
 }
 
-let lastReport = 0;
+let lastReport = 0, lastUnder = 0;
 let freqData = null;
 
 /* Visuals only. requestAnimationFrame stops in a background tab, so nothing
@@ -874,10 +878,10 @@ function frame() {
   if (pb.mode === 'live') {
     setBadge('Live · ' + ((MODE_BY_ID[App.mode] || {}).label || ''));
     const d = Live.diagnostics();
-    const hop = Net.depth ? ` · hop ${Net.depth}` : '';
+    const hop = Net.depth ? ` · hop ${Net.depth}${Net.backupConn ? '+1' : ''}` : '';
     $('#live-stats').textContent = Live.sending
-      ? `${d.codec} · ${d.kbps} kbps · ${Net.children.size} fed`
-      : `${d.codec}${hop} · ${d.gapPct}% gaps · ${d.reanchors} resyncs`;
+      ? `${d.codec} ${d.frameMs}ms · ${d.kbps} kbps · ${d.bufferMs}ms buffer · ${Net.children.size} fed`
+      : `${d.codec}${hop} · ${d.slackMs != null ? d.slackMs + 'ms slack' : '—'} · ${d.gapPct}% gaps`;
   } else if (pb.mode === 'idle' || pb.mode === 'paused') setBadge(Engine.buffer ? 'Ready' : (App.room.track ? 'Loading…' : 'No track'));
   else if (pb.mode === 'metronome') setBadge('Sync test');
   else setBadge('Playing · ' + ((MODE_BY_ID[App.mode] || {}).label || ''));
@@ -887,6 +891,137 @@ function frame() {
 
 /* Correction runs on a timer: a hidden tab still gets ~1 Hz, and audio keeps
    playing while the page is not rendering. This is the loop that keeps the room together. */
+/**
+ * Latency controller, host side.
+ *
+ * The buffer is not a guess. Every listener reports the slack its worst chunk
+ * had — how long before its deadline it actually arrived — and the buffer is
+ * pulled down until the weakest device is left with just enough margin. It
+ * comes down slowly (the listeners' epoch slew absorbs 10 ms at a time without
+ * a click) and goes back up fast, because being late is the only real failure.
+ *
+ * Frame size follows the room's size instead, since packet rate is what
+ * saturates Wi-Fi: short frames for a few devices, longer ones for a crowd.
+ */
+const MARGIN_MS = 55;              // headroom we insist the worst device keeps
+
+/** Worst margin anyone in the room currently has, and who has it. */
+function worstSlack() {
+  let worst = null, who = null;
+  for (const d of App.room.devices) {
+    const v = d.id === App.id ? Live.slackMs() : d.slack;
+    if (typeof v !== 'number') continue;
+    if (worst === null || v < worst) { worst = v; who = d; }
+  }
+  return { worst, who };
+}
+const bufferFloor = () => Math.max(80, Live.frameMs * 3 + 50);
+
+/**
+ * In normal running the buffer only goes *up*, and quickly, because arriving
+ * late is the only real failure. It does not creep downward: every device
+ * chasing a moving target is what turned 0.2 ms of spread into 9 ms while the
+ * old controller was descending. Finding the floor is a deliberate act now.
+ */
+function latencyTick() {
+  if (!App.room || !isHost() || !Live.sending) return;
+  const now = performance.now();
+  if (now - (latencyTick.at || 0) < 3000) return;
+  latencyTick.at = now;
+
+  const want = Mesh.frameMsFor(App.room.devices.length, 0.15, Live.captureRate);
+  if (want !== Live.frameMs) Live.retune(want);
+
+  if (Calibration.running) return;                 // the sweep is driving
+  const { worst } = worstSlack();
+  if (worst === null) return;
+  if (worst < MARGIN_MS) {
+    const next = clamp(Math.round(Live.bufferMs + (MARGIN_MS - worst) + 30), bufferFloor(), 3000);
+    if (next !== Live.bufferMs) { Live.bufferMs = next; pushState({ buf: next }); }
+  }
+}
+
+/**
+ * Calibration: walk the buffer down until the room complains, then step back.
+ *
+ * A network's real delay tail is not something you can look up — it depends on
+ * this room, these devices, this evening's interference. So measure it: lower
+ * the buffer 20 ms at a time and watch for the first device to run out of
+ * margin or drop a sample. That point is the floor; the setting is the floor
+ * plus a margin proportional to how far it had to fall.
+ */
+const Calibration = {
+  running: false, phase: '', floor: null, limiter: null, started: 0, timer: null,
+
+  start() {
+    if (this.running || !isHost() || !Live.sending) return;
+    this.running = true;
+    this.phase = 'settling';
+    this.floor = null;
+    this.limiter = null;
+    this.started = performance.now();
+    this.baseline = Live.bufferMs;
+    for (const d of App.room.devices) d.gaps = 0;
+    Live.stats.under = 0;
+    this.timer = setInterval(() => this.tick(), 1200);
+    setMapStatus('');
+    this.render('Settling…');
+  },
+
+  stop(note) {
+    clearInterval(this.timer);
+    this.running = false;
+    this.phase = '';
+    this.render(note || '');
+    renderRoom();
+  },
+
+  tick() {
+    if (!isHost() || !Live.sending) { this.stop('Calibration stopped — not streaming'); return; }
+    const elapsed = performance.now() - this.started;
+    if (elapsed > 120000) { this.settle('Timed out — kept ' + Live.bufferMs + ' ms'); return; }
+    if (elapsed < 3000) { this.render('Settling…'); return; }
+
+    const { worst, who } = worstSlack();
+    if (worst === null) { this.render('Waiting for reports…'); return; }
+
+    // Anyone dropping samples, or down to nothing, means we have gone too far.
+    const hurting = App.room.devices.find((d) => (d.gaps || 0) > 0);
+    if (hurting || worst < 15) {
+      this.floor = Live.bufferMs;
+      this.limiter = hurting || who;
+      const margin = Math.max(60, Math.round(this.floor * 0.25));
+      Live.bufferMs = clamp(this.floor + margin, bufferFloor(), 3000);
+      pushState({ buf: Live.bufferMs });
+      this.settle(`Floor ${this.floor} ms (${(this.limiter && this.limiter.name) || 'a device'} ran out first) — holding ${Live.bufferMs} ms`);
+      return;
+    }
+
+    if (Live.bufferMs <= bufferFloor()) {
+      Live.bufferMs = bufferFloor() + 40;
+      pushState({ buf: Live.bufferMs });
+      this.settle(`Reached the pipeline floor — holding ${Live.bufferMs} ms`);
+      return;
+    }
+
+    Live.bufferMs = Math.max(bufferFloor(), Live.bufferMs - 20);
+    pushState({ buf: Live.bufferMs });
+    this.render(`Probing ${Live.bufferMs} ms · worst margin ${worst} ms`);
+  },
+
+  settle(note) {
+    this.stop(note);
+    toast(note, 7000);
+  },
+
+  render(text) {
+    const el = $('#cal-status');
+    if (el) el.textContent = text;
+    const btn = $('#btn-calibrate-latency');
+    if (btn) btn.textContent = this.running ? 'Stop calibration' : 'Calibrate latency';
+  },
+};
+
 function syncTick() {
   if (!App.room) return;
   const pb = playback();
@@ -899,16 +1034,27 @@ function syncTick() {
   }
   if (pb.mode === 'metronome') Engine.pumpMetronome();
 
+  latencyTick();
+
   const t = performance.now();
   if (t - lastReport > 1500) {
     lastReport = t;
     if (Clock.ready) {
       const d = Engine.diagnostics();
-      pushState({
+      const patch = {
         rtt: Clock.rtt, skew: Clock.ppm(),
         drift: Engine.source ? Engine.lastError * 1000 : 0,
         lat: d.outLatencyMs, tsrc: d.tsrc,
-      });
+      };
+      const slack = Live.on ? Live.slackMs() : null;
+      if (typeof slack === 'number') patch.slack = slack;
+      const under = Live.stats.under || 0;
+      patch.gaps = Math.max(0, under - (lastUnder || 0));
+      lastUnder = under;
+      pushState(patch);
+      // Struggling on one path? Ask for a second one rather than inflating the
+      // buffer for everybody else.
+      if (Live.on && !Live.sending && typeof slack === 'number' && slack < 25) Net.requestBackup();
     }
   }
 }
@@ -1153,6 +1299,12 @@ function wireSession() {
     if (Live.sending) Live.bufferMs = ms;      // takes effect on the next chunk
   }));
   $('#btn-resync').addEventListener('click', () => { send({ t: 'resync' }); toast('Re-anchoring every device'); });
+
+  $('#btn-calibrate-latency').addEventListener('click', () => {
+    if (Calibration.running) { Calibration.stop('Stopped'); return; }
+    if (!Live.sending) { toast('Start streaming first — calibration measures the live path'); return; }
+    Calibration.start();
+  });
 
   $('#btn-diag').addEventListener('click', async () => {
     const text = JSON.stringify({

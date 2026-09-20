@@ -27,9 +27,9 @@ const Live = {
   rate: 48000, captureRate: 48000, channels: 2, bufferMs: 700, chunkFrames: 1024,
   seq: 0, epochCtx: null, player: null, playerModule: false, localAudioSuppressed: false,
   encoder: null, decoder: null, codec: 'pcm', streamFrames: 0, epochServer: 0, pending: [],
-  seen: new Set(), epochTarget: null, warmup: [],
+  seen: new Set(), epochTarget: null, warmup: [], slackWindow: [], frameMs: 20,
   stats: { sent: 0, played: 0, placed: 0, late: 0, reanchors: 0, bytes: 0,
-           lastArrival: 0, under: 0, filled: 0, decodeErrors: 0, copyErrors: 0, hops: 0 },
+           lastArrival: 0, under: 0, filled: 0, decodeErrors: 0, copyErrors: 0, hops: 0, dupes: 0 },
   codecSeen: null,
 
   get ctx() { return Engine.ctx; },
@@ -88,12 +88,15 @@ const Live = {
 
     this.captureRate = this.ctx.sampleRate;     // never touched by playback
     this.rate = this.captureRate;
+    this.frameMs = Mesh.frameMsFor(App.room ? App.room.devices.length : 2, 0.15, this.captureRate);
+    this.chunkFrames = Math.max(64, Math.round((this.captureRate * this.frameMs) / 1000));
     this.channels = 2;
     this.seq = 0;
     this.streamFrames = 0;
     this.epochServer = 0;
     await this.setupCodec();
-    this.stats = { sent: 0, played: 0, late: 0, reanchors: 0, bytes: 0, lastArrival: 0 };
+    Object.assign(this.stats, { sent: 0, played: 0, placed: 0, late: 0, reanchors: 0, bytes: 0, dupes: 0 });
+    this.slackWindow.length = 0;
     this.node.port.onmessage = (e) => this.onCaptured(e.data);
     this.sending = true;
 
@@ -131,6 +134,13 @@ const Live = {
           this.r = new Float32Array(this.n);
           this.used = 0;
           this.startTime = 0;
+          this.port.onmessage = (e) => {
+            if (!e.data || !e.data.chunk) return;
+            this.n = e.data.chunk;                 // retune: next chunk uses the new size
+            this.l = new Float32Array(this.n);
+            this.r = new Float32Array(this.n);
+            this.used = 0;
+          };
         }
         process(inputs) {
           const inp = inputs[0];
@@ -172,7 +182,7 @@ const Live = {
     if (!window.AudioEncoder) return;
     const config = {
       codec: 'opus', sampleRate: this.captureRate, numberOfChannels: 2,
-      bitrate: OPUS_BITRATE, opus: { frameDuration: 20000 },
+      bitrate: OPUS_BITRATE, opus: { frameDuration: this.frameMs * 1000 },
     };
     try {
       const probe = await AudioEncoder.isConfigSupported(config);
@@ -198,8 +208,13 @@ const Live = {
     const frames = chunk.l.length;
 
     if (this.codec === 'opus' && this.encoder && this.encoder.state === 'configured') {
-      if (!this.epochServer) this.epochServer = Engine.serverTimeOfCtx(chunk.t);
       const tsUs = Math.round((this.streamFrames / this.captureRate) * 1e6);
+      // Anchor the stream's timeline to measured capture time, and keep nudging
+      // it. Any residual slip between the encoder's clock and the room's clock
+      // would otherwise eat the buffer a few milliseconds every second.
+      const anchor = Engine.serverTimeOfCtx(chunk.t) - tsUs / 1000;
+      if (!this.epochServer) this.epochServer = anchor;
+      else this.epochServer += (anchor - this.epochServer) * 0.02;
       const planar = new Float32Array(frames * 2);
       planar.set(chunk.l, 0);
       planar.set(chunk.r, frames);
@@ -404,17 +419,25 @@ const Live = {
     const seq = view.getUint32(20);
     const tsUs = view.getFloat64(24);
 
-    // Relay before decoding: a child's buffer should not wait on our CPU.
-    // The chunk is unchanged, timestamps included, so the hop is invisible.
+    // Deduplicate first. With two paths feeding us, relaying before this check
+    // would double the traffic of everything below us.
+    if (this.seen.has(seq)) { this.stats.dupes++; return; }
+    this.seen.add(seq);
+
+    // How much margin this chunk had. This is the measurement the whole
+    // latency budget is built on: the buffer only needs to cover the worst of it.
+    const slack = playAt - Clock.now();
+    this.slackWindow.push(slack);
+    if (this.slackWindow.length > 128) this.slackWindow.shift();
+
+    // Relay onward before decoding: a child's buffer should not wait on our CPU.
+    // The chunk is unchanged, timestamps included, so the hop stays invisible.
     if (fromNetwork) {
       const onward = buf.slice(0);
       new DataView(onward).setUint8(5, Math.min(255, view.getUint8(5) + 1));
       Net.relayAudio(onward);
       this.stats.hops = view.getUint8(5);
     }
-
-    if (this.seen.has(seq)) return;                     // a duplicate from a re-parent
-    this.seen.add(seq);
     if (this.seen.size > 512) { const it = this.seen.values(); for (let i = 0; i < 128; i++) this.seen.delete(it.next().value); }
 
     this.rate = rate;
@@ -555,6 +578,32 @@ const Live = {
     this.player.port.postMessage({ idx, l, r }, [l.buffer, r.buffer]);
   },
 
+  /** Worst margin seen recently: what the buffer actually has to cover. */
+  slackMs() {
+    if (!this.slackWindow.length) return null;
+    return Math.round(Math.min(...this.slackWindow));
+  },
+
+  /**
+   * Change the frame size without dropping the stream. Shorter frames mean
+   * lower latency and more packets; the host picks from the room's size.
+   */
+  async retune(frameMs) {
+    if (!this.sending || frameMs === this.frameMs) return;
+    this.frameMs = frameMs;
+    const frames = Math.max(64, Math.round((this.captureRate * frameMs) / 1000));
+    this.chunkFrames = frames;
+    try { this.node && this.node.port.postMessage({ chunk: frames }); } catch {}
+    if (this.codec === 'opus' && this.encoder && this.encoder.state === 'configured') {
+      try {
+        this.encoder.configure({
+          codec: 'opus', sampleRate: this.captureRate, numberOfChannels: 2,
+          bitrate: OPUS_BITRATE, opus: { frameDuration: frameMs * 1000 },
+        });
+      } catch (e) { this.codecError = 'retune: ' + (e && e.message); }
+    }
+  },
+
   diagnostics() {
     return {
       on: this.on, sending: this.sending, bufferMs: this.bufferMs,
@@ -564,6 +613,7 @@ const Live = {
       copyErrors: this.stats.copyErrors,
       errMs: +(this.stats.errMs || 0).toFixed(2),
       codecError: this.codecError || null,
+      frameMs: this.frameMs, slackMs: this.slackMs(), dupes: this.stats.dupes,
       lastDecodeError: this.lastDecodeError || null,
       rate: this.rate, captureRate: this.captureRate,
       chunkMs: +(this.chunkFrames / this.captureRate * 1000).toFixed(1),

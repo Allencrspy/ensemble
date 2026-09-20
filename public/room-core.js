@@ -43,7 +43,7 @@
       calib: null, battery: null, charging: false, net: null, awake: false,
       lat: null, tsrc: null,
       peerId: opts.peerId || null,     // dialable address, for the distribution tree
-      parent: null, depth: 0, hopRtt: null,
+      parent: null, depth: 0, hopRtt: null, slack: null, buf: null, gaps: 0,
       lastSeen: opts.joinedAt,
       pos: null,            // { x, y } metres, from the acoustic room map
     };
@@ -57,6 +57,7 @@
       calib: d.calib, battery: d.battery, charging: d.charging, net: d.net,
       awake: d.awake, pos: d.pos, lat: d.lat, tsrc: d.tsrc,
       peerId: d.peerId, parent: d.parent, depth: d.depth, hopRtt: d.hopRtt,
+      slack: d.slack, buf: d.buf, gaps: d.gaps,
     };
   }
 
@@ -153,6 +154,9 @@
         num('battery', 0, 100, true);
         num('lat', 0, 2000);
         num('hopRtt', 0, 10000);
+        num('slack', -10000, 10000);
+        num('gaps', 0, 1e9);
+        num('buf', 0, 5000);
         if (typeof p.peerId === 'string') device.peerId = p.peerId.slice(0, 64);
         if (typeof p.tsrc === 'string') device.tsrc = p.tsrc.slice(0, 12);
         if (typeof p.ready === 'boolean') device.ready = p.ready;

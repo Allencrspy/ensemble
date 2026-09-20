@@ -223,7 +223,9 @@
           <div class="btn-row">
             <button class="btn ghost small" id="btn-resync">Resync room</button>
             <button class="btn ghost small" id="btn-autoalign">Auto-align delays</button>
+            <button class="btn ghost small" id="btn-calibrate-latency">Calibrate latency</button>
           </div>
+          <p class="hint tight" id="cal-status"></p>
         </div>
         <div class="btn-row"><button class="btn ghost small" id="btn-diag">Copy diagnostics</button></div>
         <p class="hint" id="sync-explain">Each device runs an NTP-style exchange, estimates its own clock drift, then schedules the exact sample that lands on a shared instant. Residual error is pulled back by micro-resampling.</p>

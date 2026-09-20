@@ -111,13 +111,20 @@ class Hub {
       dev.parent = node.parent;
       dev.depth = node.depth;
       const parent = node.parent ? this.room.devices.get(node.parent) : null;
-      const sig = `${node.parent || ''}|${parent ? parent.peerId : ''}|${node.depth}`;
+      let backup = null;
+      if (dev.wantsBackup && node.parent) {
+        const bid = Mesh.backupFor(plan, id);
+        backup = bid ? this.room.devices.get(bid) : null;
+      }
+      const sig = `${node.parent || ''}|${parent ? parent.peerId : ''}|${node.depth}|${backup ? backup.id : ''}`;
       if (dev._treeSig === sig) continue;
       dev._treeSig = sig;
       this.ctx().send(id, {
         t: 'parent',
         parentId: node.parent,
         parentPeer: parent ? parent.peerId : null,
+        backupId: backup ? backup.id : null,
+        backupPeer: backup ? backup.peerId : null,
         depth: node.depth,
       });
     }
@@ -158,6 +165,7 @@ class Hub {
     if (!device || !msg) return;
     if (msg.t === 'fetch') { this.streamTrack(deviceId); return; }
     if (msg.t === 'reparent') { device._treeSig = null; this.retree(); return; }
+    if (msg.t === 'needBackup') { device.wantsBackup = true; device._treeSig = null; this.retree(); return; }
     if (msg.t === 'state' && msg.patch && msg.patch.peerId) { device._treeSig = null; }
     if (RoomCore.handle(this.room, device, msg, this.ctx())) this.roster();
   }
@@ -192,6 +200,8 @@ const Net = {
   children: new Map(), // deviceId -> audio DataConnection we feed
   parentConn: null,    // audio DataConnection we are fed by
   parentId: null,
+  backupConn: null,    // a second, disjoint path — shortens the delay tail
+  backupId: null,
   depth: 0,
   hopRtt: null,
   link: null,
@@ -392,12 +402,14 @@ const Net = {
     conn.on('error', drop);
   },
 
-  /** Attach to the parent the host assigned, and start measuring that hop. */
-  async connectParent(parentPeer, parentId) {
+  /** Attach to a parent the host assigned, and start measuring that hop. */
+  async connectParent(parentPeer, parentId, role = 'primary') {
     if (!this.peer || !parentPeer) return;
-    if (this.parentId === parentId && this.parentConn && this.parentConn.open) return;
-    if (this.parentConn) { try { this.parentConn.close(); } catch {} this.parentConn = null; }
-    this.parentId = parentId;
+    const key = role === 'backup' ? 'backupConn' : 'parentConn';
+    const idKey = role === 'backup' ? 'backupId' : 'parentId';
+    if (this[idKey] === parentId && this[key] && this[key].open) return;
+    if (this[key]) { try { this[key].close(); } catch {} this[key] = null; }
+    this[idKey] = parentId;
 
     const conn = this.peer.connect(parentPeer, {
       label: AUDIO_LABEL,
@@ -405,32 +417,40 @@ const Net = {
       // missing one, and an ordered channel would stall everything behind it.
       reliable: false,
       serialization: 'binary',
-      metadata: { id: App.id },
+      metadata: { id: App.id, role },
     });
-    this.parentConn = conn;
+    this[key] = conn;
     conn.on('open', () => { this.onStatus('parent-linked'); });
     conn.on('data', (d) => {
       if (d instanceof ArrayBuffer || ArrayBuffer.isView(d)) { this.dispatch(d); return; }
-      if (d && d.k === 'hpr') {
+      if (d && d.k === 'hpr' && role === 'primary') {
         this.hopRtt = Math.round((performance.now() - d.t) * 10) / 10;
         this.send({ t: 'state', patch: { hopRtt: this.hopRtt } });
       }
     });
     const lost = () => {
-      if (this.parentConn !== conn) return;
-      this.parentConn = null;
-      this.send({ t: 'reparent' });        // the host will re-plan the tree
+      if (this[key] !== conn) return;
+      this[key] = null;
+      if (role === 'primary') this.send({ t: 'reparent' });   // the host re-plans
     };
     conn.on('close', lost);
     conn.on('error', lost);
+  },
+
+  /** Ask the host for a second path, when this node alone is struggling. */
+  requestBackup() {
+    if (this.backupConn || this._backupAsked) return;
+    this._backupAsked = Date.now();
+    this.send({ t: 'needBackup' });
   },
 
   /** Each node measures its own hop rather than trusting a global estimate. */
   startHopProbe() {
     clearInterval(this._hop);
     this._hop = setInterval(() => {
-      const c = this.parentConn;
-      if (c && c.open) { try { c.send({ k: 'hp', t: performance.now() }); } catch {} }
+      for (const c of [this.parentConn, this.backupConn]) {
+        if (c && c.open) { try { c.send({ k: 'hp', t: performance.now() }); } catch {} }
+      }
     }, 3000);
   },
 

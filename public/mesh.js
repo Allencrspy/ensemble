@@ -72,5 +72,68 @@
     };
   }
 
-  return { FANOUT, plan, cost };
+  /**
+   * Frame size is the latency dial and the scale dial at once, because Wi-Fi
+   * airtime is dominated by per-frame overhead (~167 us) rather than payload.
+   * Halving the frame halves the latency floor and doubles the packets, and
+   * packets are what saturate the medium:
+   *
+   *    frame   4 devices   12 devices   50 devices
+   *     5 ms      11%          42%         185%   <- impossible
+   *    10 ms       6%          22%          98%
+   *    20 ms       3%          12%          54%
+   *    40 ms       2%           7%          32%
+   *
+   * So a small room gets short frames and low latency; a big one gets long
+   * frames and stays on the air. Aim to keep the stream under ~15% occupancy.
+   */
+  function frameMsFor(devices, budget = 0.15, rate = 48000) {
+    const edges = Math.max(1, devices - 1);
+    for (const ms of [5, 10, 20, 40, 60]) {
+      // A frame has to be a whole number of samples at the capture rate, or the
+      // encoder's timeline slips against real time: 5 ms at 44.1 kHz is 220.5
+      // samples, and rounding to 221 drifts 0.23% — about 2.6 ms every second.
+      if (Math.abs((rate * ms) / 1000 - Math.round((rate * ms) / 1000)) > 1e-9) continue;
+      const bytes = Math.round(128000 * (ms / 1000) / 8) + 100;
+      const perPkt = 167 + (bytes * 8) / 65;         // us of airtime
+      if (((1000 / ms) * edges * perPkt) / 1e6 <= budget) return ms;
+    }
+    return 60;
+  }
+
+  /**
+   * A second, disjoint parent for the nodes that need one. Redundancy is what
+   * shortens the *tail*: with two paths the listener takes whichever copy lands
+   * first, so a retry or a scan on one link stops mattering. It doubles that
+   * node's share of the air, so it is handed out on request, not by default.
+   */
+  function backupFor(treeMap, id, fanout = FANOUT) {
+    const me = treeMap.get(id);
+    if (!me || !me.parent) return null;
+
+    const ancestors = new Set();
+    for (let cur = me; cur && cur.parent; cur = treeMap.get(cur.parent)) ancestors.add(cur.parent);
+    const descendants = new Set();
+    const walk = (n) => (treeMap.get(n) || { children: [] }).children.forEach((c) => { descendants.add(c); walk(c); });
+    walk(id);
+
+    let best = null;
+    for (const [other, node] of treeMap) {
+      if (other === id || other === me.parent) continue;
+      if (descendants.has(other) || ancestors.has(other)) continue;   // must not create a cycle
+      if (node.depth > me.depth) continue;                            // never take audio from below
+      const load = node.children.length + (node.backups || 0);
+      if (load >= fanout + 2) continue;
+      if (!best || node.depth < best.depth || (node.depth === best.depth && load < best.load)) {
+        best = { id: other, depth: node.depth, load };
+      }
+    }
+    if (best) {
+      const n = treeMap.get(best.id);
+      n.backups = (n.backups || 0) + 1;
+    }
+    return best ? best.id : null;
+  }
+
+  return { FANOUT, plan, cost, frameMsFor, backupFor };
 }));
