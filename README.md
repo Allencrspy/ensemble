@@ -4,8 +4,10 @@ Play one track on every device in the room, locked to the same millisecond.
 One device hosts, the others scan a QR code, and each becomes a speaker — a
 stereo pair, a 5.1 layout, or a wall of mono.
 
-No build step, no framework, no dependencies to install. Two vendored MIT
-libraries (PeerJS, a QR encoder) are the only third-party code.
+No build step, no framework, nothing to install. Two vendored MIT libraries —
+[PeerJS](https://peerjs.com) for the WebRTC handshake and
+[qrcode-generator](https://github.com/kazuhikoarase/qrcode-generator) — are the
+only third-party code, and they sit in `public/vendor/`.
 
 ## Running it
 
@@ -14,12 +16,12 @@ There is no server, so the host's own tab holds the room and every other device
 connects to it directly over WebRTC. Push this repo and turn Pages on:
 
 ```bash
-git remote add origin git@github.com:<you>/ensemble.git && git push -u origin main
+git push -u origin main
 ```
 
 Then **Settings → Pages → Source → GitHub Actions**. The included workflow
-publishes `public/` on every push to `main`. Your URL will be
-`https://<you>.github.io/ensemble/`.
+publishes `public/` on every push to `main`, and the app goes live at
+**https://allencrspy.github.io/ensemble/**
 
 A public PeerJS broker handles the initial handshake only — the offer/answer
 exchange. Audio, control messages and clock traffic go device to device and
@@ -161,3 +163,7 @@ delay measurement above is what compensates for it.
 - The public PeerJS broker is a free shared service. For anything serious, run
   your own — it is one npm package — and point `PEER_PREFIX`/`Peer()` at it in
   `public/net.js`.
+
+## Licence
+
+MIT. See [LICENSE](LICENSE).
