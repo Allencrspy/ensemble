@@ -143,6 +143,7 @@ function delaysFromMap(points, ids, calib) {
 const Ranger = {
   running: false,
   reports: new Map(),          // "from>to" -> dt in ms
+  calResults: new Map(),       // deviceId -> { ok, ms | why }
   map: null,                   // { ids, points, roles, delays, quality, mirror }
   mirror: false,
 
@@ -179,14 +180,31 @@ const Ranger = {
       if (ids.length < 2) throw new Error('Need at least two devices');
 
       // 1. Everyone measures their own speaker→mic loop.
-      onStep('measuring each speaker…');
+      this.calResults.clear();
+      onStep(`measuring each speaker (0/${ids.length})…`);
       Net.send({ t: 'relay', to: '*', payload: { k: 'selfcal' } });
-      await Ranger.selfCalibrateLocal();
-      await this.waitFor(() => App.room.devices.every((d) => typeof d.calib === 'number'), 25000);
+      const mine = await Ranger.selfCalibrateLocal();
+      this.calResults.set(App.id, mine);
+      await this.waitFor(() => {
+        onStep(`measuring each speaker (${this.calResults.size}/${ids.length})…`);
+        return this.calResults.size >= ids.length;
+      }, 22000);
+
+      const heard = ids.filter((id) => {
+        const r = this.calResults.get(id);
+        return r && r.ok;
+      });
+      if (heard.length < 2) {
+        const why = [...this.calResults.values()].find((r) => r && !r.ok);
+        throw new Error(heard.length === 0
+          ? `No device could hear itself${why ? ' — ' + why.why : ''}`
+          : 'Only one device could hear itself — the map needs at least two');
+      }
 
       // 2. Each device chirps in turn while the others listen.
       for (let i = 0; i < ids.length; i++) {
         const by = ids[i];
+        if (!heard.includes(by)) continue;              // it cannot hear, so skip its turn
         const name = devices[i].name;
         onStep(`listening to ${name} (${i + 1}/${ids.length})…`);
         const at = Clock.now() + 1400;
@@ -204,12 +222,20 @@ const Ranger = {
     } finally { this.running = false; }
   },
 
+  /** Measure this device's own speaker→mic loop, and say so either way. */
   async selfCalibrateLocal() {
     try {
       const ms = await Acoustic.selfLoop(3);
       Engine.calib = ms;
       Net.send({ t: 'state', patch: { calib: ms } });
-    } catch { /* reported by the UI elsewhere */ }
+      Net.send({ t: 'relay', to: 'host', payload: { k: 'calresult', ok: true, ms } });
+      return { ok: true, ms };
+    } catch (e) {
+      const why = e && e.message ? e.message : 'microphone unavailable';
+      Net.send({ t: 'state', patch: { calib: null } });
+      Net.send({ t: 'relay', to: 'host', payload: { k: 'calresult', ok: false, why } });
+      return { ok: false, why };
+    }
   },
 
   waitFor(cond, ms) {

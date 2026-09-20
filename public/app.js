@@ -316,7 +316,10 @@ function handleRelay(from, payload) {
   switch (payload.k) {
     case 'selfcal':
       setMapStatus('measuring this speaker…');
-      Ranger.selfCalibrateLocal().then(() => setMapStatus('waiting for the room…'));
+      Ranger.selfCalibrateLocal().then((r) => {
+        setMapStatus(r.ok ? 'waiting for the room…' : 'this device could not hear itself');
+        if (!r.ok) toast(r.why);
+      });
       break;
     case 'chirp':
       setMapStatus(`listening (${payload.by === App.id ? 'my turn' : 'another device'})…`);
@@ -324,6 +327,9 @@ function handleRelay(from, payload) {
       break;
     case 'heard':
       if (isHost()) Ranger.note(payload.by, from, payload.dt);
+      break;
+    case 'calresult':
+      if (isHost()) Ranger.calResults.set(from, payload);
       break;
     default: break;
   }
