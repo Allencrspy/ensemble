@@ -61,6 +61,7 @@ class WSLink {
 /** Runs inside the host's tab in P2P mode: the room, for everyone else. */
 class Hub {
   constructor(code) {
+    this.localId = null;             // the device belonging to the tab running this hub
     this.room = RoomCore.createRoom(code);
     this.links = new Map();          // deviceId -> link
     this.base = performance.now();
@@ -96,9 +97,18 @@ class Hub {
   }
 
   attach(link, opts) {
+    let stale = RoomCore.findByKey(this.room, opts.key);
+    if (stale && stale.id === this.localId) stale = null;   // the tab running the hub is never superseded
+    if (stale) {                       // same device, opened again: retire the old entry
+      const old = this.links.get(stale.id);
+      if (old) { try { old.send({ t: 'superseded' }); } catch {} }
+      this.room.devices.delete(stale.id);
+      if (old) { try { old.close(); } catch {} this.links.delete(stale.id); }
+    }
     const device = RoomCore.join(this.room, this.ctx(), {
       id: (crypto.randomUUID ? crypto.randomUUID() : String(Math.random())).replace(/-/g, '').slice(0, 12),
-      name: opts.name, mode: opts.mode, forceHost: !!opts.forceHost,
+      key: opts.key, name: opts.name, mode: opts.mode,
+      forceHost: !!opts.forceHost, inherit: stale,
     });
     this.links.set(device.id, link);
     link.send({ t: 'welcome', id: device.id, serverNow: this.now(), room: RoomCore.snapshot(this.room) });
@@ -192,7 +202,7 @@ const Net = {
     this.link = link;
     link.ws.onopen = () => {
       this.onStatus('connected');
-      link.send({ t: 'join', create: opts.create, code: opts.code, name: opts.name, mode: opts.mode });
+      link.send({ t: 'join', create: opts.create, code: opts.code, name: opts.name, mode: opts.mode, key: opts.key });
     };
     link.onMessage = (m) => this.dispatch(m);
     link.onClose = () => this.onStatus('closed');
@@ -232,7 +242,7 @@ const Net = {
             if (msg instanceof ArrayBuffer) return;
             if (!device) {
               if (msg.t !== 'join') return;
-              device = this.hub.attach(link, { name: msg.name, mode: msg.mode });
+              device = this.hub.attach(link, { name: msg.name, mode: msg.mode, key: msg.key });
             } else this.hub.receive(device.id, msg);
           };
           link.onClose = () => { if (device) this.hub.remove(device.id); };
@@ -248,8 +258,9 @@ const Net = {
       this.link = local;
       const device = this.hub.attach({
         send: (m) => local.deliver(m), close: () => {}, get buffered() { return 0; },
-      }, { name: opts.name, mode: opts.mode, forceHost: true });
+      }, { name: opts.name, mode: opts.mode, key: opts.key, forceHost: true });
       this.localId = device.id;
+      this.hub.localId = device.id;
       this.onStatus('connected');
       return;
     }
@@ -279,7 +290,7 @@ const Net = {
     this.code = code;
     link.onMessage = (m) => this.dispatch(m);
     link.onClose = () => this.onStatus('closed');
-    link.send({ t: 'join', name: opts.name, mode: opts.mode });
+    link.send({ t: 'join', name: opts.name, mode: opts.mode, key: opts.key });
     this.onStatus('connected');
   },
 

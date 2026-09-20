@@ -219,6 +219,14 @@ const App = {
   loadedTrackId: null, loadingTrackId: null, pendingBytes: null,
   appliedPlayback: '', scrubbing: false, lanInfo: null,
   name: localStorage.getItem('ensemble.name') || '',
+  key: (() => {
+    let k = localStorage.getItem('ensemble.key');
+    if (!k) {
+      k = (crypto.randomUUID ? crypto.randomUUID() : String(Math.random()) + Date.now()).replace(/-/g, '').slice(0, 24);
+      localStorage.setItem('ensemble.key', k);
+    }
+    return k;
+  })(),
   mode: localStorage.getItem('ensemble.mode') || 'stereo',
   trim: Number(localStorage.getItem('ensemble.trim') || 0),
   volume: Number(localStorage.getItem('ensemble.volume') || 1),
@@ -244,7 +252,10 @@ async function connectRoom(opts) {
     if (status === 'closed') onDisconnected();
   };
   try {
-    await Net.start({ create: opts.create, code: opts.code, name: App.name || defaultName(), mode: App.mode });
+    await Net.start({
+      create: opts.create, code: opts.code,
+      name: App.name || defaultName(), mode: App.mode, key: App.key,
+    });
   } catch (err) {
     landingError(err.message || 'Could not start the session');
     throw err;
@@ -299,6 +310,12 @@ function handleMessage(m) {
     }
     case 'relayed': handleRelay(m.from, m.payload); break;
     case 'promoted': toast('You are the host now'); renderShare(); break;
+    case 'superseded':
+      App.id = null;
+      Engine.stop(); Engine.stopMetronome();
+      toast('This session was reopened in another tab on this device');
+      setTimeout(() => { show('landing'); }, 300);
+      break;
     case 'kicked':
       toast('Removed from the session');
       setTimeout(() => location.reload(), 1200);

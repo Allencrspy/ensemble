@@ -33,6 +33,7 @@
   function createDevice(opts) {
     return {
       id: opts.id,
+      key: opts.key || null,
       name: String(opts.name || 'Device').slice(0, 24) || 'Device',
       isHost: !!opts.isHost,
       joinedAt: opts.joinedAt,
@@ -70,14 +71,36 @@
     };
   }
 
+  /** An earlier entry from the same physical device, if it is still listed. */
+  function findByKey(room, key) {
+    if (!key) return null;
+    for (const d of room.devices.values()) if (d.key === key) return d;
+    return null;
+  }
+
   function join(room, ctx, opts) {
+    // The transport has usually already unlisted the old entry, so it hands the
+    // object over directly; fall back to a lookup when it has not.
+    const previous = opts.inherit || findByKey(room, opts.key);
     const device = createDevice({
       id: opts.id,
+      key: opts.key,
       name: opts.name,
       mode: opts.mode,
       joinedAt: ctx.now(),
-      isHost: room.devices.size === 0 || !!opts.forceHost,
+      isHost: room.devices.size === 0 || !!opts.forceHost || !!(previous && previous.isHost),
     });
+    // Carry the old entry's setup across, so a reload does not lose this
+    // speaker's role, trim or measurements.
+    if (previous) {
+      device.mode = previous.mode;
+      device.volume = previous.volume;
+      device.muted = previous.muted;
+      device.trim = previous.trim;
+      device.calib = previous.calib;
+      device.pos = previous.pos;
+      device.name = previous.name;
+    }
     if (device.isHost) room.hostId = device.id;
     room.devices.set(device.id, device);
     return device;
@@ -246,5 +269,5 @@
     return dead;
   }
 
-  return { CODE_ALPHABET, makeCode, reap, createRoom, createDevice, publicDevice, snapshot, join, leave, setTrack, handle };
+  return { CODE_ALPHABET, makeCode, reap, findByKey, createRoom, createDevice, publicDevice, snapshot, join, leave, setTrack, handle };
 }));

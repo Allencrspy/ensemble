@@ -316,9 +316,17 @@ server.on('upgrade', (req, socket) => {
           return;
         }
       }
+      const stale = RoomCore.findByKey(room, msg.key);
+      if (stale) {                     // same device, opened again: retire the old entry
+        const old = room.conns.get(stale.id);
+        if (old) { old.send({ t: 'superseded' }); old.close(1000); }
+        room.devices.delete(stale.id);
+        room.conns.delete(stale.id);
+      }
       device = RoomCore.join(room, ctxFor(room), {
         id: crypto.randomBytes(6).toString('hex'),
-        name: msg.name, mode: msg.mode, forceHost: !!msg.create,
+        key: typeof msg.key === 'string' ? msg.key.slice(0, 40) : null,
+        name: msg.name, mode: msg.mode, forceHost: !!msg.create, inherit: stale,
       });
       room.conns.set(device.id, conn);
       conn.send({ t: 'welcome', id: device.id, serverNow: now(), room: RoomCore.snapshot(room) });
