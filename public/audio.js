@@ -30,20 +30,10 @@ const MODES = [
     icon: svg('<rect x="3" y="7" width="7" height="10" rx="2" fill="currentColor" opacity=".9"/><rect x="14" y="7" width="7" height="10" rx="2" fill="currentColor" opacity=".9"/>') },
   { id: 'mono', group: 'room', label: 'Mono', hint: 'Both channels summed — the safe choice for a single small speaker.',
     icon: svg('<circle cx="12" cy="12" r="6.5" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="2" fill="currentColor"/>') },
-  { id: 'wide', group: 'room', label: 'Wide', hint: 'Mid/side widening with a Haas delay — a big image from one device.',
-    icon: svg('<path d="M12 6v12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M7.5 8.5a5 5 0 0 0 0 7M4.5 6a9 9 0 0 0 0 12M16.5 8.5a5 5 0 0 1 0 7M19.5 6a9 9 0 0 1 0 12" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>') },
   { id: 'left', group: 'room', label: 'Left', hint: 'Only the left channel. Pair it with a device set to Right.',
     icon: svg('<path d="M13 5 7 9H4v6h3l6 4z" fill="currentColor"/>') },
   { id: 'right', group: 'room', label: 'Right', hint: 'Only the right channel. Pair it with a device set to Left.',
     icon: svg('<path d="M11 5l6 4h3v6h-3l-6 4z" fill="currentColor"/>') },
-  { id: 'center', group: 'room', label: 'Vocals', hint: 'Centre content, band-limited to the vocal range. A dialogue speaker.',
-    icon: svg('<rect x="9" y="3" width="6" height="11" rx="3" stroke="currentColor" stroke-width="2"/><path d="M6 12a6 6 0 0 0 12 0M12 18v3" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>') },
-  { id: 'side', group: 'room', label: 'Ambience', hint: 'Only the stereo difference — reverb and room tone.',
-    icon: svg('<path d="M4 12h3l3-6 4 12 3-6h3" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>') },
-  { id: 'bass', group: 'room', label: 'Bass', hint: 'Low-pass below 150 Hz. A laptop as the group subwoofer.',
-    icon: svg('<path d="M3 12c2.5 0 2.5-6 5-6s2.5 12 5 12 2.5-6 5-6h3" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>') },
-  { id: 'treble', group: 'room', label: 'Highs', hint: 'High-pass above 2.2 kHz — sparkle for phones with no low end.',
-    icon: svg('<path d="M3 12h2l1.5-4 2 8 2-10 2 12 2-8 1.5 2H21" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>') },
 
   /* ── one device = one speaker of a 5.1 / 7.1 layout ── */
   { id: 'fl', group: 'surround', label: 'Front L', short: 'FL', hint: 'Front left of the layout. Stand it to the left of the screen.',
@@ -63,6 +53,10 @@ const MODES = [
   { id: 'rr', group: 'surround', label: 'Rear R', short: 'RR', hint: 'Back-right of a 7.1 layout — the longest delay in the room.',
     icon: svg('<path d="m12 3 7 7v8h-6l-7-7" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><circle cx="15.5" cy="14.5" r="1.6" fill="currentColor"/>') },
 ];
+
+/* Rooms and saved settings from before the list was trimmed. */
+const MODE_ALIASES = { wide: 'stereo', center: 'mono', side: 'stereo', bass: 'mono', treble: 'mono' };
+const normalizeMode = (m) => (MODE_BY_ID[m] ? m : (MODE_ALIASES[m] || 'stereo'));
 
 /* Channel order of a discrete multichannel file (WAVE / AAC): FL FR FC LFE SL SR RL RR. */
 const DISCRETE_INDEX = { fl: 0, fr: 1, fc: 2, lfe: 3, sl: 4, sr: 5, rl: 6, rr: 7 };
@@ -201,19 +195,6 @@ function buildGraph(ctx, mode, channels = 2) {
     case 'mono': both(sum(0.5, 0.5)); break;
     case 'left': { const a = mk(1); sp.connect(a, 0); both(a); break; }
     case 'right': { const a = mk(1); sp.connect(a, 1); both(a); break; }
-    case 'center': both(chain(sum(0.5, 0.5), filt('highpass', 180), filt('lowpass', 6000))); break;
-    case 'side': both(sum(0.75, -0.75)); break;
-    case 'bass': both(chain(sum(0.5, 0.5), filt('lowpass', 150, 0.7), mk(1.5))); break;
-    case 'treble': both(chain(sum(0.5, 0.5), filt('highpass', 2200))); break;
-    case 'wide': {
-      const W = 1.7;
-      const mid = sum(0.5, 0.5);
-      mid.connect(mg, 0, 0); mid.connect(mg, 0, 1);
-      const side = chain(sum(0.5 * W, -0.5 * W), filt('highpass', 300), delay(0.008));
-      side.connect(mg, 0, 0);
-      const inv = mk(-1); side.connect(inv); inv.connect(mg, 0, 1);
-      break;
-    }
 
     /* ── matrix upmix: one speaker of a surround layout, out of a stereo mix ── */
     case 'fl': both(chain(sum(0.82, -0.18), filt('highpass', 90))); break;      // L minus some centre
@@ -338,10 +319,10 @@ const Engine = {
     if (this.source) { try { this.source.disconnect(); } catch {} this.source.connect(next.input); }
     if (this.graph) { const old = this.graph; setTimeout(() => { try { old.out.disconnect(); } catch {} }, 150); }
     this.graph = next;
-    if (window.Live && Live.player) Live.connectPlayer();
+    if (typeof Live !== 'undefined' && Live.player) Live.connectPlayer();   // keep the live stream attached
   },
 
-  setMode(m) { if (m === this.mode) return; this.mode = m; this.rebuild(); },
+  setMode(m) { const n = normalizeMode(m); if (n === this.mode) return; this.mode = n; this.rebuild(); },
   get discrete() { return !!(this.graph && this.graph.discrete); },
   setVolume(v) { this.volume = clamp(v, 0, 1); this.applyGain(); },
   setMuted(b) { this.muted = !!b; this.applyGain(); },

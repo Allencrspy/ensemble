@@ -227,7 +227,7 @@ const App = {
     }
     return k;
   })(),
-  mode: localStorage.getItem('ensemble.mode') || 'stereo',
+  mode: normalizeMode(localStorage.getItem('ensemble.mode') || 'stereo'),
   trim: Number(localStorage.getItem('ensemble.trim') || 0),
   volume: Number(localStorage.getItem('ensemble.volume') || 1),
   muted: false,
@@ -635,7 +635,11 @@ function renderModes() {
       ${m.short ? `<span class="badge">${m.short}</span>` : ''}
       ${m.icon}<span>${m.label}</span>
     </button>`).join('');
-  $('#mode-hint').textContent = cur.hint;
+  // Viewing the other group: say where this device's mode actually lives,
+  // rather than describing a tile that is not on screen.
+  $('#mode-hint').textContent = cur.group === App.modeGroup
+    ? cur.hint
+    : `This device is set to ${cur.label} — in the ${cur.group === 'surround' ? 'Surround' : 'Stereo'} set.`;
 
   $$('.mode', wrap).forEach((b) => b.addEventListener('click', () => {
     App.mode = b.dataset.mode;
@@ -756,7 +760,7 @@ function renderDevices() {
             ${mine ? '<span class="tag you">You</span>' : ''}
           </div>
           <div class="meta">
-            <span>${MODE_BY_ID[d.mode] ? MODE_BY_ID[d.mode].label : d.mode}</span>
+            <span>${(MODE_BY_ID[normalizeMode(d.mode)] || {}).label || d.mode}</span>
             <span>${link}</span><span>${status}</span>${extra.map((e) => `<span>${e}</span>`).join('')}
           </div>
           ${d.ready || !App.room.track ? '' : `<div class="progress"><i style="width:${Math.round(d.progress * 100)}%"></i></div>`}
@@ -780,11 +784,12 @@ function renderDevices() {
 }
 
 function modeOptions(selected) {
+  selected = normalizeMode(selected);
   const grp = (name, label) => `<optgroup label="${label}">` +
     MODES.filter((m) => m.group === name)
       .map((m) => `<option value="${m.id}"${m.id === selected ? ' selected' : ''}>${m.label}</option>`).join('') +
     '</optgroup>';
-  return grp('room', 'Stereo & roles') + grp('surround', 'Surround 5.1 / 7.1');
+  return grp('room', 'Stereo') + grp('surround', 'Surround 5.1 / 7.1');
 }
 
 function escapeHtml(s) {

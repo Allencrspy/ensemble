@@ -353,8 +353,7 @@ input[type=range][disabled] { opacity: .4; }
 .tabs { margin-bottom: 16px; }
 .tab-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 14px; }
 
-.modes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
-@media (max-width: 380px) { .modes { grid-template-columns: repeat(2, 1fr); } }
+.modes { display: grid; grid-template-columns: repeat(auto-fit, minmax(76px, 1fr)); gap: 6px; }
 .mode {
   position: relative; appearance: none; cursor: pointer; font: inherit;
   display: flex; flex-direction: column; align-items: center; gap: 5px;
